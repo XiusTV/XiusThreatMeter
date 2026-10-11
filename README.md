@@ -18,12 +18,12 @@ A clean, lightweight threat meter designed for **World of Warcraft Forever (1.60
 - **Adjustable Threshold:** Choose when the warning fires (50% – 100%, default 90%).
 - **Tank Aware:** Never warns you while you are the one tanking, and resets once your threat drops back down.
 
-### 🖥️ Damage Meter Styling
+### 🖥️ Native WoW Forever Look
 
-- **Matching Title Bar:** Warm amber glow, thin gold underline, and fade-out edges, the same look as the built-in meter's header.
-- **Matching Buttons:** Bevelled dropdown arrow, target/focus toggle, gold settings gear, and red minimize button.
+- **Blends With the Default UI:** Designed to match the default WoW Forever interface, mimicking the appearance of the built-in damage meter so the two sit side by side as if they were one set.
+- **Familiar Layout:** The title bar, header buttons, bars, and see-through background follow the damage meter's style, so there is nothing new to learn.
 - **Class Colors & Icons:** Bars use class colors with class icons; pets get green bars with their own portraits.
-- **See-Through Background:** A neutral dark backdrop with adjustable opacity so the world shows through, just like the damage meter.
+- **Adjustable Opacity:** Tune the background transparency to match your setup.
 
 ## Display States
 
