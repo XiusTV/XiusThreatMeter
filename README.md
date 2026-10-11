@@ -83,7 +83,11 @@ All settings are saved per account in `XiusThreatMeterDB`.
 
 ## More From Xius
 
-**[Xius XP & Reputation Tracker](https://www.curseforge.com/wow/addons/xius-xp-and-reputation-tracker)**: A compact HUD card that replaces the default XP and reputation bars with a single movable panel: level, XP, rested, watched faction, session rates, gold, and time-to-level. Pairs nicely with Xius Threat Meter for a clean, unified UI.
+**[Xius Marks Bar](https://github.com/XiusTV/XiusMarksBar)** ([CurseForge](https://www.curseforge.com/wow/addons/xius-marks-bar), awaiting approval): A compact raid marking bar. Click the flag for world markers, the star for target markers, and keep pull timers, ready check, and role check one click away.
+
+**[Xius XP & Reputation Tracker](https://github.com/XiusTV/XiusXPTracker)** ([CurseForge](https://www.curseforge.com/wow/addons/xius-xp-and-reputation-tracker)): A compact HUD card that replaces the default XP and reputation bars with a single movable panel: level, XP, rested, watched faction, session rates, gold, and time-to-level.
+
+Together they make a clean, unified UI.
 
 ## License
 
