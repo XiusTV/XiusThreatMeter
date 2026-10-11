@@ -83,11 +83,13 @@ All settings are saved per account in `XiusThreatMeterDB`.
 
 ## More From Xius
 
-**[Xius Marks Bar](https://github.com/XiusTV/XiusMarksBar)** ([CurseForge](https://www.curseforge.com/wow/addons/xius-marks-bar), awaiting approval): A compact raid marking bar. Click the flag for world markers, the star for target markers, and keep pull timers, ready check, and role check one click away.
+**Xius Marks Bar**: A compact raid marking bar. Click the flag for world markers or the star for target markers, with 5 / 10 / 20 pull timers, ready check, and role check built in.
+[GitHub](https://github.com/XiusTV/XiusMarksBar) · [CurseForge](https://www.curseforge.com/wow/addons/xius-marks-bar)
 
-**[Xius XP & Reputation Tracker](https://github.com/XiusTV/XiusXPTracker)** ([CurseForge](https://www.curseforge.com/wow/addons/xius-xp-and-reputation-tracker)): A compact HUD card that replaces the default XP and reputation bars with a single movable panel: level, XP, rested, watched faction, session rates, gold, and time-to-level.
+**Xius XP & Reputation Tracker**: A compact HUD card that replaces the default XP and reputation bars with a single movable panel: level, XP, rested, watched faction, session rates, gold, and time-to-level.
+[GitHub](https://github.com/XiusTV/XiusXPTracker) · [CurseForge](https://www.curseforge.com/wow/addons/xius-xp-and-reputation-tracker)
 
-Together they make a clean, unified UI.
+All Xius addons are built for World of Warcraft Forever and share the same clean, dark gold style for a unified UI.
 
 ## License
 
