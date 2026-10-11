@@ -1,0 +1,12 @@
+## Interface: 16001
+## Title: Xius Threat Meter
+## Notes: Group threat meter styled like the built-in damage meter. Type /xtm
+## Author: Xius
+## Version: 1.5.0
+## SavedVariables: XiusThreatMeterDB
+## IconTexture: Interface\Icons\Ability_Warrior_Challange
+## Category: Combat
+
+Config.lua
+Core.lua
+Options.lua
