@@ -159,20 +159,20 @@ local function BuildPanel()
     panel:Hide()
     tinsert(UISpecialFrames, "XiusThreatMeterOptions")
 
-    local titleBar = NS.CreateTitleBar(panel, 34)
+    local titleBar = NS.CreateTitleBar(panel, 24)
 
     local title = titleBar:CreateFontString(nil, "OVERLAY")
-    NS.SetFont(title, 15)
+    NS.SetFont(title, 13)
     title:SetTextColor(COLOR.gold[1], COLOR.gold[2], COLOR.gold[3])
-    title:SetPoint("LEFT", titleBar, "LEFT", 12, 0)
+    title:SetPoint("LEFT", titleBar, "LEFT", 10, 0)
     title:SetText("Threat Meter Settings")
 
     local close = CreateFrame("Button", nil, titleBar)
-    close:SetSize(24, 24)
-    close:SetPoint("RIGHT", titleBar, "RIGHT", -6, 0)
+    close:SetSize(18, 18)
+    close:SetPoint("RIGHT", titleBar, "RIGHT", -5, 0)
     NS.StyleButton(close, true)
     local x = close:CreateFontString(nil, "OVERLAY")
-    NS.SetFont(x, 13)
+    NS.SetFont(x, 11)
     x:SetTextColor(COLOR.dash[1], COLOR.dash[2], COLOR.dash[3])
     x:SetPoint("CENTER", 0, 0)
     x:SetText("X")
@@ -186,7 +186,7 @@ local function BuildPanel()
         panel:Hide()
     end)
 
-    local y = -46
+    local y = -34
 
     y = SectionHeader(panel, "Window", y)
     y = CreateCheck(panel, "Lock window", "locked", y, "Stops the window from being moved or resized.")

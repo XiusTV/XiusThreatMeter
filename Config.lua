@@ -5,7 +5,7 @@
 
 local ADDON, NS = ...
 
-NS.VERSION = "1.5.0"
+NS.VERSION = "1.5.3"
 NS.STYLE_VERSION = 6
 NS.FONT = STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF"
 NS.WHITE = "Interface\\Buttons\\WHITE8X8"
@@ -165,9 +165,20 @@ function NS.CreateWindowBackground(frame)
 end
 
 function NS.SetWindowAlpha(frame, alpha)
+    local tex = frame.bgTex
+    if not tex then
+        return
+    end
+    if not frame.bgReady then
+        tex:SetTexture(NS.WHITE)
+        frame.bgReady = true
+    end
+    if frame.appliedAlpha == alpha then
+        return
+    end
+    frame.appliedAlpha = alpha
     local c = NS.COLOR.window
-    frame.bgTex:SetTexture(NS.WHITE)
-    frame.bgTex:SetVertexColor(c[1], c[2], c[3], alpha)
+    tex:SetVertexColor(c[1], c[2], c[3], alpha)
 end
 
 -- A line or glow strip that fades out at both ends.
@@ -212,20 +223,23 @@ function NS.CreateTitleBar(frame, height)
     bar:SetHeight(height)
 
     local C = NS.COLOR
+    local topInset = 2
 
-    -- Warm glow that rises from the bottom edge and is gone by the top.
-    local glowHeight = math.floor(height * 0.42)
-    bar.glow = NS.CreateFadedStrip(bar, "BACKGROUND", 1, 34)
-    NS.AnchorFadedStrip(bar.glow, bar, -(height - 1 - glowHeight), glowHeight)
-    NS.SetGradient(bar.glow.mid, "VERTICAL", C.glow, 0.95, C.glow, 0)
-    NS.SetGradient(bar.glow.left, "HORIZONTAL", C.glow, 0, C.glow, 0.4)
-    NS.SetGradient(bar.glow.right, "HORIZONTAL", C.glow, 0.4, C.glow, 0)
+    -- One full-width vertical glow. Side-faded strips used to leave a washed
+    -- horizontal band across the right half of the header.
+    local glowHeight = math.max(7, math.floor(height * 0.48))
+    bar.glow = bar:CreateTexture(nil, "BACKGROUND", nil, 1)
+    bar.glow:SetTexture(NS.WHITE)
+    bar.glow:SetPoint("BOTTOMLEFT", bar, "BOTTOMLEFT", 0, 1)
+    bar.glow:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT", 0, 1)
+    bar.glow:SetHeight(glowHeight)
+    NS.SetGradient(bar.glow, "VERTICAL", C.glow, 0.88, C.glow, 0)
 
-    bar.topLine = NS.CreateFadedStrip(bar, "BORDER", 1, 40)
-    NS.AnchorFadedStrip(bar.topLine, bar, -3, 1)
+    bar.topLine = NS.CreateFadedStrip(bar, "BORDER", 1, 36)
+    NS.AnchorFadedStrip(bar.topLine, bar, -topInset, 1)
     NS.ColorFadedStrip(bar.topLine, C.goldLineDim, 1)
 
-    bar.bottomLine = NS.CreateFadedStrip(bar, "BORDER", 1, 40)
+    bar.bottomLine = NS.CreateFadedStrip(bar, "BORDER", 1, 36)
     NS.AnchorFadedStrip(bar.bottomLine, bar, -(height - 1), 1)
     NS.ColorFadedStrip(bar.bottomLine, C.goldLine, 1)
 
@@ -247,11 +261,11 @@ local BUTTON_SKINS = {
         bevelLeftTop = { 0.29, 0.29, 0.29 }, bevelLeftBottom = { 0.18, 0.18, 0.18 },
     },
     red = {
-        rimTop = { 0.59, 0.49, 0.39 }, rimBottom = { 0.48, 0.38, 0.28 },
-        fillTop = { 0.60, 0.02, 0.01 }, fillBottom = { 0.42, 0.03, 0.02 },
-        bevelTop = { 0.30, 0, 0 }, bevelTop2 = { 0.52, 0.01, 0 },
-        bevelLeftTop = { 0.30, 0, 0 }, bevelLeftBottom = { 0.25, 0, 0 },
-        shadowBottom = { 0.22, 0.01, 0 },
+        rimTop = { 0.55, 0.45, 0.34 }, rimBottom = { 0.40, 0.30, 0.20 },
+        fillTop = { 0.48, 0.03, 0.02 }, fillBottom = { 0.28, 0.02, 0.02 },
+        bevelTop = { 0.26, 0, 0 }, bevelTop2 = { 0.40, 0.02, 0 },
+        bevelLeftTop = { 0.26, 0, 0 }, bevelLeftBottom = { 0.18, 0, 0 },
+        shadowBottom = { 0.16, 0.01, 0 },
     },
 }
 
@@ -402,12 +416,12 @@ local function Tooth(parent, w, h, sublevel, angle, radius, color)
     return t
 end
 
--- Gold cog: 8 short teeth, gold ring, dark gap, gold center dot.
+-- Gold cog: finer teeth and a clearer center hole, closer to the default UI.
 function NS.CreateGearGlyph(button)
     local g = CreateFrame("Frame", nil, button)
-    g:SetSize(15, 15)
+    g:SetSize(13, 13)
     g:SetPoint("CENTER", button, "CENTER", 0, 0)
-    local shadow = { 0, 0, 0, 0.55 }
+    local shadow = { 0, 0, 0, 0.5 }
     for i = 0, 7 do
         local angle = i * math.pi / 4 + math.pi / 2
         local mix = (math.sin(angle) + 1) / 2
@@ -416,38 +430,38 @@ function NS.CreateGearGlyph(button)
             GOLD_BOTTOM[2] + (GOLD_TOP[2] - GOLD_BOTTOM[2]) * mix,
             0,
         }
-        Tooth(g, 4.2, 3.4, 0, angle, 6, shadow)
-        Tooth(g, 3.2, 2.4, 2, angle, 6, toothColor)
+        Tooth(g, 3.0, 2.2, 0, angle, 5.2, shadow)
+        Tooth(g, 2.3, 1.6, 2, angle, 5.2, toothColor)
     end
-    Circle(g, 12, 1, shadow)
-    Circle(g, 11, 3, GOLD_BOTTOM, GOLD_TOP)
-    Circle(g, 7, 4, { 0.12, 0.12, 0.12 })
-    Circle(g, 4.5, 5, GOLD_BOTTOM, GOLD_TOP)
+    Circle(g, 10.5, 1, shadow)
+    Circle(g, 9.5, 3, GOLD_BOTTOM, GOLD_TOP)
+    Circle(g, 5.8, 4, { 0.07, 0.07, 0.07 })
+    Circle(g, 3.0, 5, GOLD_BOTTOM, GOLD_TOP)
     return g
 end
 
--- Wide flat down-pointing triangle: yellow at the top fading to orange-gold,
--- with a black line along its top edge. { left offset, width } per row.
+-- Filled chevron that sits large in the header button, like Damage Done.
+-- { left offset, width } per row.
 local ARROW_ROWS = {
-    { 0, 12 }, { 0, 11 }, { 1, 9 }, { 2, 7 }, { 3, 6 }, { 3, 5 }, { 4, 3 }, { 5, 1 },
+    { 0, 14 }, { 0, 13 }, { 1, 11 }, { 2, 9 }, { 3, 7 }, { 4, 5 }, { 5, 3 }, { 6, 1 },
 }
 
 function NS.CreateArrowGlyph(button, yOffset)
     local g = CreateFrame("Frame", nil, button)
-    g:SetSize(12, #ARROW_ROWS + 1)
+    g:SetSize(14, #ARROW_ROWS + 1)
     g:SetPoint("CENTER", button, "CENTER", 0, yOffset or 0)
 
     local topEdge = g:CreateTexture(nil, "ARTWORK", nil, 0)
     topEdge:SetTexture(NS.WHITE)
-    topEdge:SetVertexColor(0, 0, 0, 0.9)
-    topEdge:SetSize(12, 1)
+    topEdge:SetVertexColor(0, 0, 0, 0.85)
+    topEdge:SetSize(14, 1)
     topEdge:SetPoint("TOPLEFT", g, "TOPLEFT", 0, 0)
 
     local n = #ARROW_ROWS
     for i, row in ipairs(ARROW_ROWS) do
         local f = (i - 1) / (n - 1)
-        local left = { 1, 0.99 - f * 0.25, 0 }
-        local right = { 0.99, 0.80 - f * 0.18, 0 }
+        local left = { 1, 0.96 - f * 0.22, 0 }
+        local right = { 0.98, 0.78 - f * 0.16, 0 }
         local t = g:CreateTexture(nil, "ARTWORK", nil, 1)
         t:SetTexture(NS.WHITE)
         t:SetSize(row[2], 1)
