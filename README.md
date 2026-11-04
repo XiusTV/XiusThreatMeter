@@ -89,6 +89,12 @@ All settings are saved per account in `XiusThreatMeterDB`.
 **Xius XP & Reputation Tracker**: A compact HUD card that replaces the default XP and reputation bars with a single movable panel: level, XP, rested, watched faction, session rates, gold, and time-to-level.
 [GitHub](https://github.com/XiusTV/XiusXPTracker) · [CurseForge](https://www.curseforge.com/wow/addons/xius-xp-and-reputation-tracker)
 
+**Xius Max Graphics**: Pick-and-choose graphics upgrades for Forever and retail. Ultimate, Balance, and Defaults presets push view distance, grass, shadows, water, and image clarity past the normal graphics menu, with optional loot and gathering sparkles.
+[GitHub](https://github.com/XiusTV/XiusMaxGFX)
+
+**Xius Kill Streak**: A ten-tier kill streak announcer for mobs and enemy players. Each new tier shows a banner and plays a call, with a small counter for the current streak and the time left to keep it going.
+[GitHub](https://github.com/XiusTV/XiusKillStreak)
+
 All Xius addons are built for World of Warcraft Forever and share the same clean, dark gold style for a unified UI.
 
 ## License
