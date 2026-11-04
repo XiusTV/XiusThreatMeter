@@ -21,10 +21,11 @@ local BODY_TOP_GAP = 2
 local MIN_WIDTH, MAX_WIDTH = 170, 600
 local MIN_HEIGHT, MAX_HEIGHT = 80, 800
 local MAX_ROWS = 40
--- Event-driven updates coalesce to EVENT_THROTTLE; COMBAT_REFRESH is the
--- safety poll while fighting (threat can change without a client event).
-local EVENT_THROTTLE = 0.12
-local COMBAT_REFRESH = 0.25
+-- Events are coalesced so a busy fight scans a few times a second, not once
+-- per event. The combat poll is only a safety net for threat that changes
+-- without a client event (the server itself updates about once a second).
+local EVENT_THROTTLE = 0.2
+local COMBAT_REFRESH = 0.6
 local IDLE_REFRESH = 1
 local TEST_REFRESH = 1
 local BAR_FILL = 0.8
@@ -40,26 +41,44 @@ local CLASS_COORDS = {
     PRIEST = { 0.49609375, 0.7421875, 0.25, 0.5 },
     WARLOCK = { 0.7421875, 0.98828125, 0.25, 0.5 },
     PALADIN = { 0, 0.25, 0.5, 0.75 },
+    DEATHKNIGHT = { 0.25, 0.49609375, 0.5, 0.75 },
+    MONK = { 0.49609375, 0.7421875, 0.5, 0.75 },
+    DEMONHUNTER = { 0.7421875, 0.98828125, 0.5, 0.75 },
+    EVOKER = { 0, 0.25, 0.75, 1 },
+}
+
+local FALLBACK_CLASS_COLORS = {
+    WARRIOR = { r = 0.78, g = 0.61, b = 0.43 },
+    MAGE = { r = 0.25, g = 0.78, b = 0.92 },
+    ROGUE = { r = 1.00, g = 0.96, b = 0.41 },
+    DRUID = { r = 1.00, g = 0.49, b = 0.04 },
+    HUNTER = { r = 0.67, g = 0.83, b = 0.45 },
+    SHAMAN = { r = 0.00, g = 0.44, b = 0.87 },
+    PRIEST = { r = 1.00, g = 1.00, b = 1.00 },
+    WARLOCK = { r = 0.53, g = 0.53, b = 0.93 },
+    PALADIN = { r = 0.96, g = 0.55, b = 0.73 },
+    DEATHKNIGHT = { r = 0.77, g = 0.12, b = 0.23 },
+    MONK = { r = 0.00, g = 1.00, b = 0.60 },
+    DEMONHUNTER = { r = 0.64, g = 0.19, b = 0.79 },
+    EVOKER = { r = 0.20, g = 0.58, b = 0.50 },
 }
 
 local UnitDetailedThreatSituation = _G.UnitDetailedThreatSituation
+local UnitThreatSituation = _G.UnitThreatSituation
 local issecretvalue = _G.issecretvalue
 local UnitExists = _G.UnitExists
+local UnitIsVisible = _G.UnitIsVisible
 local UnitName = _G.UnitName
 local UnitClass = _G.UnitClass
 local UnitCanAttack = _G.UnitCanAttack
 local UnitIsUnit = _G.UnitIsUnit
 local UnitAffectingCombat = _G.UnitAffectingCombat
 local UnitGUID = _G.UnitGUID
-local GetNumGroupMembers = _G.GetNumGroupMembers or _G.GetNumRaidMembers
-local GetNumSubgroupMembers = _G.GetNumSubgroupMembers or _G.GetNumPartyMembers
 local IsInRaid = _G.IsInRaid
-if not IsInRaid and _G.GetNumRaidMembers then
-    local GetNumRaidMembers = _G.GetNumRaidMembers
-    IsInRaid = function()
-        return GetNumRaidMembers() > 0
-    end
-end
+local IsInGroup = _G.IsInGroup
+local GetNumGroupMembers = _G.GetNumGroupMembers
+local GetNumRaidMembers = _G.GetNumRaidMembers
+local GetNumPartyMembers = _G.GetNumPartyMembers
 local floor = math.floor
 local abs = math.abs
 local max = math.max
@@ -75,24 +94,40 @@ local pool = {}
 local identity = {}
 local transient = {}
 local testMode = false
-local testValues
 local testPlayerName, testPlayerClass
 local warned = false
 local titleHot = false
 local inCombat = false
 local playerEntry
+local petEntry
+local heldPet
 local hoveredRow
+local apiMissing = false
 local petSerial = 0
 local scriptError = false
 local updating = false
 local tickElapsed = 0
 local threatDirty = false
+local usingOnUpdate = false
 local lastMobGUID
 local lastMobName
 local SyncDriver
 local RequestUpdate
+local CheckWarning
 
 local checkSecret = issecretvalue ~= nil
+
+-- Secret numbers can be drawn by widgets. They cannot be compared, sorted, or concatenated.
+local function IsSecret(v)
+    return checkSecret and issecretvalue(v)
+end
+
+local function IsNumberLike(v)
+    if IsSecret(v) then
+        return true
+    end
+    return type(v) == "number"
+end
 
 local RANK_PREFIX = {}
 local PCT_TEXT = {}
@@ -104,9 +139,12 @@ for i = -10, 300 do
 end
 
 local PARTY, PARTYPET, RAID, RAIDPET = {}, {}, {}, {}
+local IS_PARTY_UNIT = {}
 for i = 1, 4 do
     PARTY[i] = "party" .. i
     PARTYPET[i] = "partypet" .. i
+    IS_PARTY_UNIT[PARTY[i]] = true
+    IS_PARTY_UNIT[PARTYPET[i]] = true
 end
 for i = 1, 40 do
     RAID[i] = "raid" .. i
@@ -126,6 +164,15 @@ local function FormatValue(n)
     return tostring(floor(n + 0.5))
 end
 
+local function QuantizeValue(n)
+    if n >= 1000000 then
+        return floor(n / 10000 + 0.5) * 10000
+    elseif n >= 10000 then
+        return floor(n / 100 + 0.5) * 100
+    end
+    return floor(n + 0.5)
+end
+
 local function ClampDB(v, minV, maxV, default)
     if type(v) ~= "number" or v ~= v then
         return default
@@ -143,41 +190,103 @@ local function SanitizeDB()
     if not DB then
         return
     end
-    DB.scale = ClampDB(DB.scale, 0.5, 2, 1)
-    DB.bgAlpha = ClampDB(DB.bgAlpha, 0, 1, 0.45)
-    DB.barHeight = ClampDB(DB.barHeight, 12, 32, 19)
-    DB.barSpacing = ClampDB(DB.barSpacing, 0, 8, 2)
-    DB.width = ClampDB(DB.width, MIN_WIDTH, MAX_WIDTH, 250)
-    DB.height = ClampDB(DB.height, MIN_HEIGHT, MAX_HEIGHT, 190)
-    DB.warnThreshold = ClampDB(DB.warnThreshold, 50, 100, 90)
+    local function SnapStep(v, step, minV, maxV, default)
+        v = ClampDB(v, minV, maxV, default)
+        local n = floor(v / step + 0.5) * step
+        if step < 1 then
+            n = floor(n * 100 + 0.5) / 100
+        end
+        if n < minV then
+            n = minV
+        elseif n > maxV then
+            n = maxV
+        end
+        return n
+    end
+    DB.scale = SnapStep(DB.scale, 0.05, 0.5, 2, 1)
+    DB.bgAlpha = SnapStep(DB.bgAlpha, 0.05, 0, 1, 0.45)
+    DB.barHeight = SnapStep(DB.barHeight, 1, 12, 32, 19)
+    DB.barSpacing = SnapStep(DB.barSpacing, 1, 0, 8, 2)
+    DB.width = SnapStep(DB.width, 1, MIN_WIDTH, MAX_WIDTH, 250)
+    DB.height = SnapStep(DB.height, 1, MIN_HEIGHT, MAX_HEIGHT, 190)
+    DB.warnThreshold = SnapStep(DB.warnThreshold, 5, 50, 100, 90)
     if DB.mode ~= "focus" and DB.mode ~= "target" then
         DB.mode = "target"
     end
+    local function Flag(v)
+        return v and true or false
+    end
+    DB.hidden = Flag(DB.hidden)
+    DB.locked = Flag(DB.locked)
+    DB.minimized = Flag(DB.minimized)
+    DB.showIcons = Flag(DB.showIcons)
+    DB.showPets = Flag(DB.showPets)
+    DB.showValues = Flag(DB.showValues)
+    DB.hideOutOfCombat = Flag(DB.hideOutOfCombat)
+    DB.onlyWithThreat = Flag(DB.onlyWithThreat)
+    DB.onlyInGroup = Flag(DB.onlyInGroup)
+    DB.warnEnabled = Flag(DB.warnEnabled)
     local p = DB.point
-    if type(p) ~= "table" or type(p[1]) ~= "string" or type(p[3]) ~= "number" or type(p[4]) ~= "number" then
+    if type(p) ~= "table" or type(p[1]) ~= "string" or (p[2] ~= nil and type(p[2]) ~= "string") or type(p[3]) ~= "number" or type(p[4]) ~= "number" then
         DB.point = { "CENTER", "CENTER", 300, 0 }
     end
 end
 
 local function GetClassRGB(class)
-    local t = (CUSTOM_CLASS_COLORS and CUSTOM_CLASS_COLORS[class]) or (RAID_CLASS_COLORS and RAID_CLASS_COLORS[class])
+    if IsSecret(class) or not class then
+        return 0.6, 0.6, 0.6
+    end
+    local t = (CUSTOM_CLASS_COLORS and CUSTOM_CLASS_COLORS[class])
+        or (RAID_CLASS_COLORS and RAID_CLASS_COLORS[class])
+        or FALLBACK_CLASS_COLORS[class]
     if t then
         return t.r, t.g, t.b
     end
     return 0.6, 0.6, 0.6
 end
 
+local function InRaid()
+    if IsInRaid then
+        local r = IsInRaid()
+        if not IsSecret(r) then
+            return r and true or false
+        end
+    end
+    if GetNumRaidMembers then
+        local n = GetNumRaidMembers()
+        if not IsSecret(n) and type(n) == "number" then
+            return n > 0
+        end
+    end
+    return false
+end
+
 local function InGroup()
     if IsInGroup then
-        return IsInGroup()
+        local g = IsInGroup()
+        if not IsSecret(g) then
+            return g and true or false
+        end
     end
-    if IsInRaid and IsInRaid() then
-        return true
+    if GetNumGroupMembers then
+        local n = GetNumGroupMembers()
+        if not IsSecret(n) and type(n) == "number" then
+            return n > 0
+        end
     end
-    if GetNumGroupMembers and GetNumGroupMembers() > 0 then
-        return true
+    if GetNumRaidMembers then
+        local n = GetNumRaidMembers()
+        if not IsSecret(n) and type(n) == "number" and n > 0 then
+            return true
+        end
     end
-    return (GetNumSubgroupMembers and GetNumSubgroupMembers() or 0) > 0
+    if GetNumPartyMembers then
+        local n = GetNumPartyMembers()
+        if not IsSecret(n) and type(n) == "number" and n > 0 then
+            return true
+        end
+    end
+    return false
 end
 
 local function ShowTooltip(owner, title, line)
@@ -198,7 +307,12 @@ end
 ----------------------------------------------------------------------
 
 local function ClearData()
+    if heldPet then
+        pool[#pool + 1] = heldPet
+        heldPet = nil
+    end
     playerEntry = nil
+    petEntry = nil
     for i = #data, 1, -1 do
         pool[#pool + 1] = data[i]
         data[i] = nil
@@ -207,8 +321,53 @@ end
 
 local function NewEntry()
     local e = remove(pool) or {}
-    data[#data + 1] = e
+    local idx = #data + 1
+    data[idx] = e
+    e.order = idx
     return e
+end
+
+local function PlainPct(entry)
+    if not entry or IsSecret(entry.pct) or type(entry.pct) ~= "number" then
+        return nil
+    end
+    return entry.pct
+end
+
+local function PlainGuid(unit)
+    if not UnitGUID then
+        return nil
+    end
+    local guid = UnitGUID(unit)
+    if IsSecret(guid) then
+        return nil
+    end
+    return guid
+end
+
+-- true, false, or nil when the client will not allow the comparison.
+-- Group tokens such as raid12 can come back secret on a restricted map,
+-- so a guid match is the backup. The "player" and "pet" tokens never need this.
+local function SameUnit(unit, other)
+    if unit == other then
+        return true
+    end
+    if UnitIsUnit then
+        local same = UnitIsUnit(unit, other)
+        if not IsSecret(same) then
+            return same and true or false
+        end
+    end
+    if UnitGUID then
+        local targetGuid = PlainGuid(other)
+        if targetGuid then
+            local guid = PlainGuid(unit)
+            if guid then
+                return guid == targetGuid
+            end
+        end
+    end
+    return nil
 end
 
 local function WipeIdentity()
@@ -218,8 +377,8 @@ local function WipeIdentity()
     end
 end
 
--- Name, class and "is this me?" stay valid until the roster, a pet, or a
--- name resolves. Threat numbers are never cached.
+-- Name, class and "is this me / my pet?" stay valid until the roster, a pet,
+-- or a name resolves. Threat numbers are never cached.
 local function GetIdentity(unit, isPet)
     local id = identity[unit]
     if id then
@@ -228,23 +387,98 @@ local function GetIdentity(unit, isPet)
     local name = UnitName(unit)
     local class
     local isPlayer = false
+    local playerChecked = false
+    local isOwnPet = false
+    local petChecked = false
+
     if isPet then
-        if not name then
+        if unit == "pet" or unit == "playerpet" then
+            isOwnPet = true
+            petChecked = true
+        elseif IS_PARTY_UNIT[unit] then
+            isOwnPet = false
+            petChecked = true
+        else
+            local petExists = UnitExists("pet")
+            if not IsSecret(petExists) then
+                if not petExists then
+                    isOwnPet = false
+                    petChecked = true
+                else
+                    local same = SameUnit(unit, "pet")
+                    if same ~= nil then
+                        isOwnPet = same
+                        petChecked = true
+                    end
+                end
+            end
+        end
+        if IsSecret(name) then
+            transient.name = name
+            transient.class = nil
+            transient.isPlayer = false
+            transient.playerChecked = false
+            transient.isOwnPet = isOwnPet
+            transient.petChecked = petChecked
+            transient.iconID = unit
+            transient.petSerial = petSerial
+            return transient
+        end
+        if not name or name == "" then
             transient.name = "Pet"
             transient.class = nil
             transient.isPlayer = false
+            transient.playerChecked = false
+            transient.isOwnPet = isOwnPet
+            transient.petChecked = petChecked
             transient.iconID = unit
             transient.petSerial = petSerial
             return transient
         end
     else
+        if unit == "player" then
+            isPlayer = true
+            playerChecked = true
+        elseif IS_PARTY_UNIT[unit] then
+            isPlayer = false
+            playerChecked = true
+        else
+            local same = SameUnit(unit, "player")
+            if same ~= nil then
+                isPlayer = same
+                playerChecked = true
+            end
+        end
         local _
         _, class = UnitClass(unit)
-        isPlayer = (unit == "player" or UnitIsUnit(unit, "player")) and true or false
-        if not name or not class then
-            transient.name = name or UNKNOWN or "Unknown"
+        if IsSecret(name) or IsSecret(class) then
+            if IsSecret(name) then
+                transient.name = name
+            elseif not name or name == "" then
+                transient.name = UNKNOWN or "Unknown"
+            else
+                transient.name = name
+            end
+            if IsSecret(class) then
+                transient.class = nil
+            else
+                transient.class = class
+            end
+            transient.isPlayer = isPlayer
+            transient.playerChecked = playerChecked
+            transient.isOwnPet = false
+            transient.petChecked = false
+            transient.iconID = nil
+            transient.petSerial = nil
+            return transient
+        end
+        if not name or name == "" or not class then
+            transient.name = (name and name ~= "") and name or UNKNOWN or "Unknown"
             transient.class = class
             transient.isPlayer = isPlayer
+            transient.playerChecked = playerChecked
+            transient.isOwnPet = false
+            transient.petChecked = false
             transient.iconID = nil
             transient.petSerial = nil
             return transient
@@ -254,80 +488,267 @@ local function GetIdentity(unit, isPet)
         name = name,
         class = class,
         isPlayer = isPlayer,
+        playerChecked = playerChecked,
+        isOwnPet = isOwnPet,
+        petChecked = petChecked,
     }
     if isPet then
-        local guid = UnitGUID and UnitGUID(unit) or nil
-        id.iconID = guid or unit
-        id.petSerial = guid and 0 or petSerial
+        local guid = PlainGuid(unit)
+        if not guid then
+            id.iconID = unit
+            id.petSerial = petSerial
+        else
+            id.iconID = guid
+            id.petSerial = 0
+        end
     end
     identity[unit] = id
     return id
 end
 
 local function SortData(a, b)
-    if a.value ~= b.value then
-        return a.value > b.value
+    if a == b then
+        return false
+    end
+    if a.secret ~= b.secret then
+        return not a.secret
+    end
+    if a.secret then
+        local ap = PlainPct(a)
+        local bp = PlainPct(b)
+        local aHasPct = ap ~= nil
+        local bHasPct = bp ~= nil
+        if aHasPct ~= bHasPct then
+            return aHasPct
+        end
+        if aHasPct and ap ~= bp then
+            return ap > bp
+        end
+        local as = a.status or -1
+        local bs = b.status or -1
+        if as ~= bs then
+            return as > bs
+        end
+    else
+        if a.value ~= b.value then
+            return a.value > b.value
+        end
     end
     if a.isTanking ~= b.isTanking then
-        return a.isTanking
+        return a.isTanking and not b.isTanking
     end
-    return a.name < b.name
+    local aNameSecret = IsSecret(a.name)
+    local bNameSecret = IsSecret(b.name)
+    if aNameSecret ~= bNameSecret then
+        return not aNameSecret
+    end
+    if not aNameSecret then
+        local an = a.name or ""
+        local bn = b.name or ""
+        if an ~= bn then
+            return an < bn
+        end
+    end
+    return (a.order or 0) < (b.order or 0)
 end
 
+local function Hostile(unit)
+    local exists = UnitExists(unit)
+    if IsSecret(exists) or not exists then
+        return false
+    end
+    local can = UnitCanAttack("player", unit)
+    if IsSecret(can) then
+        -- Compound tokens such as targettarget are hidden on restricted maps.
+        -- Treat that as hostile so a healer still tracks the tank's target.
+        return true
+    end
+    return can and true or false
+end
+
+-- Target mode prefers your target, then whatever your target is fighting
+-- (so a healer targeting the tank still sees the boss). Focus mode does
+-- the same with focus / focustarget.
 local function GetMobUnit()
     if DB.mode == "focus" then
-        if UnitExists("focus") and UnitCanAttack("player", "focus") then
+        if Hostile("focus") then
             return "focus"
+        end
+        if Hostile("focustarget") then
+            return "focustarget"
         end
         return nil
     end
-    if UnitExists("target") and UnitCanAttack("player", "target") then
+    if Hostile("target") then
         return "target"
+    end
+    if Hostile("targettarget") then
+        return "targettarget"
     end
     return nil
 end
 
 local function AddUnit(unit, mob, isPet)
-    -- Cheap existence check before any identity / threat API work.
-    if not UnitExists(unit) then
-        identity[unit] = nil
+    local exists = UnitExists(unit)
+    if IsSecret(exists) or not exists then
+        if identity[unit] then
+            identity[unit] = nil
+        end
         return
     end
     local id = GetIdentity(unit, isPet)
     if not id then
         return
     end
-    local isTanking, _, scaledPct, rawPct, value = UnitDetailedThreatSituation(unit, mob)
-    -- Secret values error if compared. Check them before the numeric test.
-    if checkSecret then
-        if issecretvalue(isTanking) or issecretvalue(scaledPct) or issecretvalue(rawPct) or issecretvalue(value) then
-            return
+    if isPet then
+        if unit ~= "pet" then
+            if id.petChecked then
+                if id.isOwnPet then
+                    return
+                end
+            else
+                local same = SameUnit(unit, "pet")
+                if same ~= nil then
+                    if identity[unit] == id then
+                        id.isOwnPet = same
+                        id.petChecked = true
+                    end
+                    if same then
+                        return
+                    end
+                end
+            end
+        end
+    else
+        if unit ~= "player" then
+            if id.playerChecked then
+                if id.isPlayer then
+                    return
+                end
+            else
+                local same = SameUnit(unit, "player")
+                if same ~= nil then
+                    if identity[unit] == id then
+                        id.isPlayer = same
+                        id.playerChecked = true
+                    end
+                    if same then
+                        return
+                    end
+                end
+            end
         end
     end
-    if value == nil or value <= 0 then
+    if not UnitDetailedThreatSituation then
+        if not apiMissing then
+            apiMissing = true
+            NS.Print("This client has no threat readout, so live bars stay empty. Test mode still works.")
+        end
+        return
+    end
+    local ok, isTanking, status, scaledPct, rawPct, value = pcall(UnitDetailedThreatSituation, unit, mob)
+    if not ok then
         return
     end
 
-    local e = NewEntry()
+    local tankSecret = IsSecret(isTanking)
+    local statusSecret = IsSecret(status)
+    local scaledSecret = IsSecret(scaledPct)
+    local rawSecret = IsSecret(rawPct)
+    local valueSecret = IsSecret(value)
+    local valuesSecret = scaledSecret or rawSecret or valueSecret
+    local plainStatus = (not statusSecret and type(status) == "number") and status or nil
+    if not plainStatus and valuesSecret and UnitThreatSituation then
+        local okS, fallbackStatus = pcall(UnitThreatSituation, unit, mob)
+        if okS and not IsSecret(fallbackStatus) and type(fallbackStatus) == "number" then
+            plainStatus = fallbackStatus
+        end
+    end
+    local tanking = (not tankSecret and isTanking) or (plainStatus and plainStatus >= 2)
+
+    if not valuesSecret then
+        if type(value) ~= "number" or value <= 0 then
+            if type(rawPct) == "number" and rawPct > 0 then
+                value = rawPct
+            elseif type(scaledPct) == "number" and scaledPct > 0 then
+                value = scaledPct
+            elseif tanking then
+                value = (type(scaledPct) == "number" and scaledPct) or (type(rawPct) == "number" and rawPct) or 0
+            else
+                return
+            end
+        end
+    end
+
+    local e
+    if isPet and not DB.showPets then
+        e = remove(pool) or {}
+        e.order = 0
+        heldPet = e
+    else
+        e = NewEntry()
+    end
     e.unit = unit
     e.name = id.name
     e.class = id.class
     e.isPet = isPet
     e.isPlayer = id.isPlayer and true or false
-    e.isTanking = isTanking and true or false
-    -- Tanking units report as 100% scaled threat so the bar and warning match
-    -- the client's aggro state even when scaledPct briefly lags.
-    if e.isTanking then
-        e.pct = 100
+    e.isTanking = tanking and true or false
+    e.status = plainStatus
+    e.secret = valuesSecret
+    if valuesSecret then
+        if scaledSecret then
+            e.pct = scaledPct
+        elseif type(scaledPct) == "number" then
+            e.pct = scaledPct
+        elseif rawSecret then
+            e.pct = rawPct
+        elseif type(rawPct) == "number" then
+            e.pct = rawPct
+        else
+            e.pct = tanking and 100 or 0
+        end
+        if rawSecret then
+            e.rawPct = rawPct
+        elseif type(rawPct) == "number" then
+            e.rawPct = rawPct
+        else
+            e.rawPct = e.pct
+        end
+        if valueSecret then
+            e.value = value
+        elseif type(value) == "number" then
+            e.value = value
+        else
+            e.value = e.pct
+        end
     else
-        e.pct = scaledPct or 0
+        -- Tanking units report as 100% scaled threat so the bar and warning match
+        -- the client's aggro state even when scaledPct briefly lags.
+        if e.isTanking then
+            e.pct = 100
+        elseif type(scaledPct) == "number" then
+            e.pct = scaledPct
+        elseif type(rawPct) == "number" then
+            e.pct = rawPct
+        else
+            e.pct = 0
+        end
+        if type(rawPct) == "number" then
+            e.rawPct = rawPct
+        else
+            e.rawPct = e.pct
+        end
+        e.value = value
     end
-    e.rawPct = rawPct or 0
-    e.value = value
     if isPet then
         local c = COLOR.pet
         e.r, e.g, e.b = c[1], c[2], c[3]
-        e.iconID = id.iconID or unit
+        if IsSecret(id.iconID) or not id.iconID then
+            e.iconID = unit
+        else
+            e.iconID = id.iconID
+        end
         e.petSerial = id.petSerial or petSerial
     else
         e.r, e.g, e.b = GetClassRGB(id.class)
@@ -336,27 +757,31 @@ local function AddUnit(unit, mob, isPet)
     end
     if e.isPlayer then
         playerEntry = e
+    elseif isPet and (unit == "pet" or id.isOwnPet) then
+        petEntry = e
     end
 end
 
 local function CollectThreat(mob)
     ClearData()
     local pets = DB.showPets
-    if IsInRaid and IsInRaid() then
-        local n = GetNumGroupMembers and GetNumGroupMembers() or 0
-        for i = 1, n do
+    -- Always read you and your pet from their own tokens. In a raid the same
+    -- unit is also raidN / raidpetN, and UnitIsUnit on that slot can be secret.
+    AddUnit("player", mob, false)
+    if pets or DB.warnEnabled then
+        AddUnit("pet", mob, true)
+    end
+    if InRaid() then
+        -- Raid unit ids are not always packed into 1..count, so check every slot.
+        -- Empty slots stop at UnitExists and never call the threat API.
+        for i = 1, 40 do
             AddUnit(RAID[i], mob, false)
             if pets then
                 AddUnit(RAIDPET[i], mob, true)
             end
         end
-    else
-        AddUnit("player", mob, false)
-        if pets then
-            AddUnit("pet", mob, true)
-        end
-        local n = GetNumSubgroupMembers and GetNumSubgroupMembers() or 0
-        for i = 1, n do
+    elseif InGroup() then
+        for i = 1, 4 do
             AddUnit(PARTY[i], mob, false)
             if pets then
                 AddUnit(PARTYPET[i], mob, true)
@@ -380,44 +805,101 @@ local TEST_ROSTER = {
     { "Holyhand", "PRIEST" },
 }
 
+local TEST_BASE = { 10000, 7200, 9000, 5100, 4200, 3600, 3000, 2400, 1800 }
+local TEST_SWING = { 200, 180, 1600, 160, 140, 120, 100, 80, 60 }
+local testPhase = 0
+
 local function BuildTestData()
     ClearData()
-    if not testValues then
-        testValues = {}
-        for i = 1, #TEST_ROSTER do
-            testValues[i] = 9000 - i * 800 + math.random(0, 400)
+    testPhase = testPhase + 0.35
+    if not testPlayerName or testPlayerName == "You" then
+        local playerName = UnitName("player")
+        if IsSecret(playerName) or not playerName or playerName == "" or playerName == UNKNOWN then
+            testPlayerName = "You"
+        else
+            testPlayerName = playerName
         end
-    end
-    if not testPlayerName then
-        testPlayerName = UnitName("player") or "You"
         local _, myClass = UnitClass("player")
+        if IsSecret(myClass) then
+            myClass = nil
+        end
         testPlayerClass = myClass
     end
-    for i = 1, #TEST_ROSTER do
-        testValues[i] = testValues[i] + math.random(0, 250) + (i == 1 and 260 or 0)
+    local function RowValue(i)
+        local base = TEST_BASE[i] or 1500
+        local swing = TEST_SWING[i] or 50
+        return base + math.sin(testPhase + i) * swing
     end
-    local tankValue = testValues[1]
+    local tankValue = RowValue(1)
     for i = 1, #TEST_ROSTER do
         local e = NewEntry()
         local name, class = TEST_ROSTER[i][1], TEST_ROSTER[i][2]
+        local isPlayer = (name == nil)
         if not name then
             name = testPlayerName
             class = testPlayerClass
+        end
+        local value = RowValue(i)
+        if isPlayer and value > tankValue * 0.99 then
+            value = tankValue * 0.99
+        end
+        if value < 0 then
+            value = 0
         end
         e.unit = nil
         e.name = name
         e.class = class
         e.isPet = false
-        e.isPlayer = (TEST_ROSTER[i][1] == nil)
-        e.isTanking = (i == 1)
-        e.value = testValues[i]
-        e.pct = min(100, testValues[i] / tankValue * 100)
-        e.rawPct = e.pct
+        e.isPlayer = isPlayer
+        e.isTanking = false
+        e.secret = false
+        e.status = nil
+        e.value = value
+        e.pct = 0
+        e.rawPct = 0
         e.r, e.g, e.b = GetClassRGB(class)
         e.iconID = nil
         e.petSerial = nil
+        if isPlayer then
+            playerEntry = e
+        end
+    end
+    if DB.showPets then
+        local e = NewEntry()
+        local owner = playerEntry and playerEntry.value or 0
+        local hasPet = false
+        if UnitExists then
+            local exists = UnitExists("pet")
+            hasPet = not IsSecret(exists) and exists and true or false
+        end
+        e.unit = hasPet and "pet" or nil
+        e.name = testPlayerName .. "'s Pet"
+        e.class = nil
+        e.isPet = true
+        e.isPlayer = false
+        e.isTanking = false
+        e.secret = false
+        e.status = nil
+        e.value = owner * 0.45
+        e.pct = 0
+        e.rawPct = 0
+        local c = COLOR.pet
+        e.r, e.g, e.b = c[1], c[2], c[3]
+        e.iconID = "testpet"
+        e.petSerial = 0
+        petEntry = e
     end
     sort(data, SortData)
+    local top = (data[1] and data[1].value) or 1
+    if top <= 0 then
+        top = 1
+    end
+    for i = 1, #data do
+        local e = data[i]
+        e.isTanking = (i == 1)
+        e.pct = min(100, e.value / top * 100)
+        e.rawPct = e.pct
+    end
 end
 
 ----------------------------------------------------------------------
@@ -430,12 +912,30 @@ local function Row_OnEnter(self)
         return
     end
     hoveredRow = self
-    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    if GameTooltip.IsOwned and GameTooltip:IsOwned(self) then
+        GameTooltip:ClearLines()
+    else
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    end
     local r, g, b = e.r or 1, e.g or 1, e.b or 1
-    GameTooltip:SetText(e.name, r, g, b)
-    GameTooltip:AddDoubleLine("Threat", FormatValue(e.value), 0.8, 0.8, 0.8, 1, 1, 1)
-    GameTooltip:AddDoubleLine("Threat %", format("%.1f%%", e.pct), 0.8, 0.8, 0.8, 1, 1, 1)
-    GameTooltip:AddDoubleLine("Raw %", format("%.1f%%", e.rawPct), 0.8, 0.8, 0.8, 1, 1, 1)
+    if IsSecret(e.name) then
+        pcall(GameTooltip.SetText, GameTooltip, e.name, r, g, b)
+    else
+        GameTooltip:SetText((e.name and e.name ~= "") and e.name or UNKNOWN or "Unknown", r, g, b)
+    end
+    local function AddTooltipValue(label, value, asPercent)
+        if IsSecret(value) then
+            if not pcall(GameTooltip.AddDoubleLine, GameTooltip, label, value, 0.8, 0.8, 0.8, 1, 1, 1) then
+                GameTooltip:AddDoubleLine(label, "Hidden", 0.8, 0.8, 0.8, 1, 1, 1)
+            end
+            return
+        end
+        local text = asPercent and format("%.1f%%", value or 0) or FormatValue(value or 0)
+        GameTooltip:AddDoubleLine(label, text, 0.8, 0.8, 0.8, 1, 1, 1)
+    end
+    AddTooltipValue("Threat", e.value, false)
+    AddTooltipValue("Aggro %", e.pct, true)
+    AddTooltipValue("Of tank", e.rawPct, true)
     if e.isTanking then
         GameTooltip:AddLine("Currently tanking", 1, 0.3, 0.3)
     end
@@ -593,19 +1093,45 @@ local function SetRowIcon(row, e)
     if not DB.showIcons then
         return
     end
-    if e.isPet and e.unit then
-        if row.iconPet ~= e.iconID or row.iconPetSerial ~= e.petSerial then
-            SetPortraitTexture(row.icon, e.unit)
-            row.icon:SetTexCoord(0.1, 0.9, 0.1, 0.9)
-            row.iconPet = e.iconID
+    if e.isPet then
+        local key = e.unit or "pet"
+        if e.iconID and not IsSecret(e.iconID) then
+            key = e.iconID
+        end
+        local vis = false
+        if e.unit and SetPortraitTexture then
+            if UnitIsVisible then
+                local v = UnitIsVisible(e.unit)
+                vis = not IsSecret(v) and v and true or false
+            else
+                local exists = UnitExists(e.unit)
+                vis = not IsSecret(exists) and exists and true or false
+            end
+        end
+        if row.iconPet ~= key or row.iconPetSerial ~= e.petSerial or (vis and not row.iconPetVis) then
+            local drawn = false
+            if vis then
+                drawn = pcall(SetPortraitTexture, row.icon, e.unit)
+            end
+            if drawn then
+                row.icon:SetTexCoord(0.1, 0.9, 0.1, 0.9)
+            else
+                row.icon:SetTexture("Interface\\Icons\\Ability_Hunter_BeastCall")
+                row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+            end
+            row.iconPet = key
             row.iconPetSerial = e.petSerial
+            row.iconPetVis = drawn
             row.iconClass = nil
         end
         return
     end
-    local classKey = e.class or false
+    local classKey = false
+    if not IsSecret(e.class) then
+        classKey = e.class or false
+    end
     if row.iconClass ~= classKey then
-        local coords = e.class and ((CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[e.class]) or CLASS_COORDS[e.class])
+        local coords = classKey and ((CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[classKey]) or CLASS_COORDS[classKey])
         if coords then
             row.icon:SetTexture(CLASS_TEXTURE)
             row.icon:SetTexCoord(coords[1] + 0.015, coords[2] - 0.015, coords[3] + 0.015, coords[4] - 0.015)
@@ -615,6 +1141,40 @@ local function SetRowIcon(row, e)
         end
         row.iconClass = classKey
         row.iconPet = nil
+        row.iconPetVis = nil
+    end
+end
+
+local function PaintSecretText(fs, showValues, value, pct)
+    local plainPct = (not IsSecret(pct) and type(pct) == "number") and floor(pct + 0.5) or nil
+    if showValues and IsNumberLike(value) and IsNumberLike(pct) then
+        if plainPct then
+            if pcall(fs.SetFormattedText, fs, "%.0f (%d%%)", value, plainPct) then
+                return
+            end
+            if pcall(fs.SetFormattedText, fs, "%s (%d%%)", value, plainPct) then
+                return
+            end
+        end
+        if pcall(fs.SetFormattedText, fs, "%.0f (%.0f%%)", value, pct) then
+            return
+        end
+        if pcall(fs.SetFormattedText, fs, "%s (%s%%)", value, pct) then
+            return
+        end
+    end
+    if plainPct then
+        fs:SetText(PCT_TEXT[plainPct] or (tostring(plainPct) .. "%"))
+        return
+    end
+    if IsNumberLike(pct) and pcall(fs.SetFormattedText, fs, "%.0f%%", pct) then
+        return
+    end
+    if IsNumberLike(pct) and pcall(fs.SetFormattedText, fs, "%s%%", pct) then
+        return
+    end
+    if IsNumberLike(pct) then
+        pcall(fs.SetText, fs, pct)
     end
 end
 
@@ -623,10 +1183,14 @@ local function Render()
         return
     end
     LayoutRows()
-    local top = data[1] and data[1].value or 1
-    if top <= 0 then
-        top = 1
+    local top = 0
+    for i = 1, #data do
+        local entry = data[i]
+        if entry and not entry.secret and not IsSecret(entry.value) and type(entry.value) == "number" and entry.value > top then
+            top = entry.value
+        end
     end
+    local barMax = top > 0 and top or 100
     local showValues = DB.showValues and true or false
     local n = ui.numRows
     for i = 1, n do
@@ -640,31 +1204,79 @@ local function Render()
                 row.bar:SetStatusBarColor(r * BAR_FILL, g * BAR_FILL, b * BAR_FILL, 1)
                 row.bar.bg:SetVertexColor(r * BAR_BACK, g * BAR_BACK, b * BAR_BACK, 1)
             end
-            local maxChanged = row.maxThreat ~= top
-            if maxChanged then
-                row.maxThreat = top
-                row.bar:SetMinMaxValues(0, top)
-            end
-            if maxChanged or row.barValue ~= e.value then
-                row.barValue = e.value
-                row.bar:SetValue(e.value)
-            end
-            if row.rank ~= i or row.unitName ~= e.name then
-                row.rank = i
-                row.unitName = e.name
-                row.name:SetText(RANK_PREFIX[i] .. e.name)
-                nameChanged = true
-            end
-            local pctInt = floor(e.pct + 0.5)
-            if row.pctInt ~= pctInt or row.rawValue ~= e.value or row.valueMode ~= showValues then
-                local pctText = PCT_TEXT[pctInt] or (tostring(pctInt) .. "%")
-                local text = showValues and (FormatValue(e.value) .. " (" .. pctText .. ")") or pctText
-                row.pctInt = pctInt
-                row.rawValue = e.value
-                row.valueMode = showValues
-                if row.valueText ~= text then
-                    row.valueText = text
-                    row.value:SetText(text)
+            if e.secret then
+                if not row.secretMode then
+                    row.secretMode = true
+                    row.maxThreat = nil
+                    row.barValue = nil
+                    row.pctInt = nil
+                    row.rawValue = nil
+                    row.valueText = nil
+                    row.unitName = nil
+                    row.bar:SetMinMaxValues(0, 100)
+                end
+                if IsNumberLike(e.pct) then
+                    pcall(row.bar.SetValue, row.bar, e.pct)
+                end
+                if IsSecret(e.name) or row.rank ~= i or row.unitName ~= e.name then
+                    row.rank = i
+                    nameChanged = true
+                    if IsSecret(e.name) then
+                        row.unitName = nil
+                        if not pcall(row.name.SetFormattedText, row.name, "%d. %s", i, e.name) then
+                            pcall(row.name.SetText, row.name, e.name)
+                        end
+                    else
+                        row.unitName = e.name
+                        row.name:SetText(RANK_PREFIX[i] .. (e.name or ""))
+                    end
+                end
+                PaintSecretText(row.value, showValues, e.value, e.pct)
+            else
+                if row.secretMode then
+                    row.secretMode = false
+                    row.maxThreat = nil
+                    row.barValue = nil
+                    row.pctInt = nil
+                    row.rawValue = nil
+                    row.valueText = nil
+                    row.unitName = nil
+                end
+                local maxChanged = row.maxThreat ~= barMax
+                if maxChanged then
+                    row.maxThreat = barMax
+                    row.bar:SetMinMaxValues(0, barMax)
+                end
+                local fillVal = top > 0 and e.value or e.pct
+                if maxChanged or row.barValue ~= fillVal then
+                    row.barValue = fillVal
+                    row.bar:SetValue(fillVal)
+                end
+                if IsSecret(e.name) then
+                    row.rank = i
+                    row.unitName = nil
+                    nameChanged = true
+                    if not pcall(row.name.SetFormattedText, row.name, "%d. %s", i, e.name) then
+                        pcall(row.name.SetText, row.name, e.name)
+                    end
+                elseif row.rank ~= i or row.unitName ~= e.name then
+                    row.rank = i
+                    row.unitName = e.name
+                    row.name:SetText(RANK_PREFIX[i] .. (e.name or ""))
+                    nameChanged = true
+                end
+                local pctInt = floor(e.pct + 0.5)
+                local qVal = showValues and QuantizeValue(e.value) or nil
+                if row.pctInt ~= pctInt or row.valueMode ~= showValues or (showValues and row.rawValue ~= qVal) then
+                    local pctText = PCT_TEXT[pctInt] or (tostring(pctInt) .. "%")
+                    local text = showValues and (FormatValue(e.value) .. " (" .. pctText .. ")") or pctText
+                    row.pctInt = pctInt
+                    row.rawValue = qVal
+                    row.valueMode = showValues
+                    if row.valueText ~= text then
+                        row.valueText = text
+                        row.value:SetText(text)
+                    end
                 end
             end
             SetRowIcon(row, e)
@@ -672,11 +1284,15 @@ local function Render()
             if not row:IsShown() then
                 row:Show()
             end
-            if hoveredRow == row and (nameChanged or row.tipValue ~= e.value or row.tipPct ~= e.pct or row.tipRaw ~= e.rawPct) then
-                row.tipValue, row.tipPct, row.tipRaw = e.value, e.pct, e.rawPct
+            if e.secret then
+                if hoveredRow == row then
+                    Row_OnEnter(row)
+                end
+            elseif hoveredRow == row and (nameChanged or row.tipValue ~= e.value or row.tipPct ~= e.pct or row.tipRaw ~= e.rawPct or row.tipTank ~= e.isTanking) then
+                row.tipValue, row.tipPct, row.tipRaw, row.tipTank = e.value, e.pct, e.rawPct, e.isTanking
                 Row_OnEnter(row)
             else
-                row.tipValue, row.tipPct, row.tipRaw = e.value, e.pct, e.rawPct
+                row.tipValue, row.tipPct, row.tipRaw, row.tipTank = e.value, e.pct, e.rawPct, e.isTanking
             end
         elseif row then
             row.entry = nil
@@ -736,7 +1352,7 @@ local function ShouldShow()
     if DB.onlyInGroup and not InGroup() then
         return false
     end
-    if DB.hideOutOfCombat and not UnitAffectingCombat("player") then
+    if DB.hideOutOfCombat and not (inCombat or UnitAffectingCombat("player")) then
         return false
     end
     if DB.onlyWithThreat and #data == 0 then
@@ -850,8 +1466,18 @@ function NS.ApplySettings()
     local f = ui.frame
     ui.applying = true
     if ui.appliedScale ~= DB.scale then
+        local prevScale = ui.appliedScale
         f:SetScale(DB.scale)
         ui.appliedScale = DB.scale
+        if prevScale and prevScale > 0 and IsTopLeftAnchored(f) and type(DB.point) == "table" and type(DB.point[3]) == "number" and type(DB.point[4]) == "number" then
+            local ratio = prevScale / DB.scale
+            local newX = DB.point[3] * ratio
+            local newY = DB.point[4] * ratio
+            DB.point[3] = newX
+            DB.point[4] = newY
+            f:ClearAllPoints()
+            f:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", newX, newY)
+        end
     end
     NS.SetWindowAlpha(f, DB.bgAlpha)
     if abs((f:GetWidth() or 0) - DB.width) > 0.5 then
@@ -865,15 +1491,23 @@ function NS.ApplySettings()
     else
         LayoutRows()
     end
-    NS.UpdateVisibility()
-    local pets = DB.showPets and true or false
-    if ui.appliedPets ~= pets then
-        ui.appliedPets = pets
-        if not testMode then
-            NS.Update()
-            return
-        end
+    if ui.menu and ui.appliedMenuScale ~= DB.scale then
+        ui.menu:SetScale(DB.scale)
+        ui.appliedMenuScale = DB.scale
     end
+    -- Pets and visibility rules need a fresh scan. Sliders that only change
+    -- the look (scale, opacity, bar size) do not.
+    local sig = (DB.showPets and "1" or "0")
+        .. (DB.onlyWithThreat and "1" or "0")
+        .. (DB.hideOutOfCombat and "1" or "0")
+        .. (DB.onlyInGroup and "1" or "0")
+    if ui.settingsSig ~= sig then
+        ui.settingsSig = sig
+        NS.Update()
+        return
+    end
+    NS.UpdateVisibility()
+    CheckWarning()
     if f:IsShown() and not DB.minimized then
         Render()
     end
@@ -918,19 +1552,27 @@ function NS.SetHidden(hidden)
         inCombat = UnitAffectingCombat("player") and true or false
         NS.UpdateVisibility()
         SyncDriver()
-        NS.Print("Window hidden. Type /xtm to show it again.")
+        if NS.RefreshOptions then
+            NS.RefreshOptions()
+        end
+        NS.Print("Window hidden. Use /xtm show or the settings window to show it again.")
     else
         NS.Update()
+        if NS.RefreshOptions then
+            NS.RefreshOptions()
+        end
         if not ui.frame:IsShown() then
-            NS.Print("Window enabled, but one of your settings is hiding it right now (combat, group or threat). Type /xtm config to change that.")
+            NS.Print("Window enabled, but one of your settings is hiding it right now (combat, group or threat). Type /xtm to change that.")
         end
     end
 end
 
 function NS.SetTestMode(on)
     testMode = on and true or false
-    testValues = nil
-    if not testMode then
+    testPhase = 0
+    if testMode then
+        DB.hidden = false
+    else
         ClearData()
         testPlayerName = nil
         testPlayerClass = nil
@@ -953,7 +1595,23 @@ function NS.ResetPosition()
     NS.ResetLayout()
     RestorePosition()
     NS.ApplySettings()
+    if NS.RefreshOptions then
+        NS.RefreshOptions()
+    end
     NS.Print("Window position and size reset.")
+end
+
+function NS.ResetAllSettings()
+    if NS.ResetDefaults then
+        NS.ResetDefaults()
+    end
+    SanitizeDB()
+    RestorePosition()
+    NS.ApplySettings()
+    if NS.RefreshOptions then
+        NS.RefreshOptions()
+    end
+    NS.Print("All settings reset to defaults.")
 end
 
 ----------------------------------------------------------------------
@@ -968,16 +1626,74 @@ local function PlayWarning()
     pcall(PlaySound, id)
 end
 
-local function CheckWarning()
-    local me = (DB.warnEnabled and not testMode) and playerEntry or nil
-    local hot = me and (not me.isTanking) and me.pct >= DB.warnThreshold and true or false
-    if hot then
-        if not warned then
-            warned = true
-            PlayWarning()
+local function WarningSource()
+    if not DB.warnEnabled then
+        return nil
+    end
+    if playerEntry and playerEntry.isTanking then
+        return nil
+    end
+    local best
+    if playerEntry then
+        best = playerEntry
+    end
+    if petEntry and not petEntry.isTanking then
+        if not best then
+            best = petEntry
+        else
+            local petPct = PlainPct(petEntry)
+            local bestPct = PlainPct(best)
+            if petPct ~= nil and bestPct ~= nil then
+                if petPct > bestPct then
+                    best = petEntry
+                end
+            elseif petEntry.secret or best.secret then
+                if (petEntry.status or -1) > (best.status or -1) then
+                    best = petEntry
+                end
+            elseif petPct and not bestPct then
+                best = petEntry
+            end
         end
-    elseif not me or me.isTanking or me.pct < DB.warnThreshold - 10 then
-        warned = false
+    end
+    return best
+end
+
+function CheckWarning()
+    if not ui.title then
+        return
+    end
+    local me = WarningSource()
+    local hot = false
+    local pct = PlainPct(me)
+    if me and pct == nil then
+        -- Status 1 is the client's "about to pull" state. The percent slider
+        -- cannot be read while the threat percent is secret.
+        hot = me.status == 1
+        if hot then
+            if not warned then
+                warned = true
+                if not testMode then
+                    PlayWarning()
+                end
+            end
+        else
+            warned = false
+        end
+    else
+        pct = pct or 0
+        hot = me and pct >= DB.warnThreshold and true or false
+        if hot then
+            if not warned then
+                warned = true
+                -- Test mode still turns the title red. The sound is reserved for a real fight.
+                if not testMode then
+                    PlayWarning()
+                end
+            end
+        elseif not me or pct < DB.warnThreshold - 10 then
+            warned = false
+        end
     end
     if hot ~= titleHot then
         titleHot = hot
@@ -1002,19 +1718,49 @@ local function DoUpdate()
         lastMobName = "Training Dummy"
         SetTargetLabel(lastMobName)
     else
+        local groupOk = not DB.onlyInGroup or InGroup()
+        local canShow = not DB.hidden and groupOk and (not DB.hideOutOfCombat or inCombat)
+        local warnActive = DB.warnEnabled and inCombat and groupOk
+        if not canShow and not warnActive then
+            if lastMobGUID or #data > 0 or playerEntry or petEntry then
+                ClearData()
+            end
+            lastMobGUID = nil
+            lastMobName = nil
+            warned = false
+            SetTargetLabel("")
+            NS.UpdateVisibility()
+            CheckWarning()
+            return
+        end
         local mob = GetMobUnit()
         if mob then
-            local guid = UnitGUID and UnitGUID(mob) or mob
+            local guid
+            if UnitGUID then
+                guid = UnitGUID(mob)
+            end
+            if IsSecret(guid) or type(guid) ~= "string" then
+                guid = "token:" .. mob
+            end
             if guid ~= lastMobGUID then
                 lastMobGUID = guid
                 warned = false
                 lastMobName = nil
             end
             CollectThreat(mob)
-            local name = UnitName(mob) or UNKNOWN or "Unknown"
-            if name ~= lastMobName then
-                lastMobName = name
-                SetTargetLabel(name)
+            local name = UnitName(mob)
+            if IsSecret(name) then
+                lastMobName = nil
+                ui.targetLabel = nil
+                pcall(ui.targetText.SetText, ui.targetText, name)
+            else
+                if not name or name == "" then
+                    name = UNKNOWN or "Unknown"
+                end
+                if name ~= lastMobName then
+                    lastMobName = name
+                    SetTargetLabel(name)
+                end
             end
         else
             if lastMobGUID or #data > 0 then
@@ -1045,17 +1791,15 @@ function NS.Update()
     threatDirty = false
     local ok, err = pcall(DoUpdate)
     updating = false
-    if not ok and not scriptError then
+    if ok then
+        scriptError = false
+    elseif not scriptError then
         scriptError = true
         NS.Print("Hit an error and kept running (" .. tostring(err) .. "). If the bars look wrong, type /reload.")
     end
     tickElapsed = 0
     if SyncDriver then
-        SyncDriver()
-    end
-    -- A threat event arrived while we were scanning; refresh again shortly.
-    if threatDirty then
-        SyncDriver()
+        SyncDriver(true)
     end
 end
 
@@ -1071,6 +1815,9 @@ function RequestUpdate(immediate)
     end
     if immediate or tickElapsed >= EVENT_THROTTLE then
         NS.Update()
+        return
+    end
+    if threatDirty and usingOnUpdate then
         return
     end
     threatDirty = true
@@ -1117,7 +1864,10 @@ local function BuildMenuItems()
     }
 end
 
-local function Menu_OnEvent(self)
+local function Menu_OnEvent(self, _, button)
+    if button == "RightButton" and ui.titleBar and ui.titleBar:IsMouseOver() then
+        return
+    end
     if not self:IsMouseOver() and not ui.menuBtn:IsMouseOver() then
         self:Hide()
     end
@@ -1196,7 +1946,11 @@ local function ShowMenu()
             b:SetHeight(18)
             b:EnableMouse(true)
             b.text:SetText(item.text)
-            b.check:SetShown(item.checked and true or false)
+            if item.checked then
+                b.check:Show()
+            else
+                b.check:Hide()
+            end
             b.line:Hide()
             b.func = item.func
             y = y - 18
@@ -1269,11 +2023,16 @@ end
 
 local function TitleBar_OnDragStart()
     if not DB.locked then
+        ui.moving = true
         ui.frame:StartMoving()
     end
 end
 
 local function TitleBar_OnDragStop()
+    if not ui.moving then
+        return
+    end
+    ui.moving = false
     ui.frame:StopMovingOrSizing()
     SavePosition()
 end
@@ -1291,8 +2050,11 @@ local function Grip_OnMouseUp()
     end
     ui.sizing = false
     ui.frame:StopMovingOrSizing()
-    DB.width = math.floor(ui.frame:GetWidth() + 0.5)
-    DB.height = math.floor(ui.frame:GetHeight() + 0.5)
+    local w = ClampDB(floor((ui.frame:GetWidth() or DB.width) + 0.5), MIN_WIDTH, MAX_WIDTH, DB.width)
+    local h = ClampDB(floor((ui.frame:GetHeight() or DB.height) + 0.5), MIN_HEIGHT, MAX_HEIGHT, DB.height)
+    DB.width = w
+    DB.height = h
+    ui.frame:SetSize(w, h)
     SavePosition()
     LayoutRows()
     Render()
@@ -1438,6 +2200,9 @@ local function CreateWindow()
         Render()
     end)
     f:SetScript("OnHide", function()
+        if ui.moving then
+            TitleBar_OnDragStop()
+        end
         if ui.sizing then
             Grip_OnMouseUp()
         end
@@ -1462,7 +2227,6 @@ end
 
 local driver = CreateFrame("Frame")
 local pollInterval = IDLE_REFRESH
-local usingOnUpdate = false
 
 local function OnUpdate(_, elapsed)
     tickElapsed = tickElapsed + elapsed
@@ -1492,9 +2256,12 @@ local function StartDriver(interval)
     end
 end
 
-function SyncDriver()
+function SyncDriver(skipCombatRefresh)
     if not ui.frame or not DB then
         return
+    end
+    if not skipCombatRefresh then
+        inCombat = UnitAffectingCombat("player") and true or false
     end
     if DB.hidden then
         if DB.warnEnabled and inCombat and not testMode then
@@ -1513,9 +2280,9 @@ function SyncDriver()
         StartDriver(COMBAT_REFRESH)
         return
     end
-    -- Out of combat: only poll while a hostile target/focus is up so we
-    -- are not scanning the roster every second for an empty window.
-    if ui.frame:IsShown() and GetMobUnit() then
+    -- Out of combat: only poll while a hostile target/focus is up and the
+    -- window is allowed to show (including waiting for threat to appear).
+    if not DB.hideOutOfCombat and (not DB.onlyInGroup or InGroup()) and GetMobUnit() then
         StartDriver(IDLE_REFRESH)
         return
     end
@@ -1533,8 +2300,6 @@ local EVENTS = {
     "UNIT_THREAT_LIST_UPDATE",
     "UNIT_THREAT_SITUATION_UPDATE",
     "GROUP_ROSTER_UPDATE",
-    "PARTY_MEMBERS_CHANGED",
-    "RAID_ROSTER_UPDATE",
     "UNIT_PET",
     "UNIT_NAME_UPDATE",
     "PLAYER_REGEN_DISABLED",
@@ -1549,6 +2314,9 @@ driver:SetScript("OnEvent", function(self, event, arg1)
             NS.InitDB()
             DB = NS.db
             SanitizeDB()
+            if NS.InitOptions then
+                NS.InitOptions()
+            end
             self:UnregisterEvent("ADDON_LOADED")
         end
         return
@@ -1562,10 +2330,16 @@ driver:SetScript("OnEvent", function(self, event, arg1)
         SanitizeDB()
         inCombat = UnitAffectingCombat("player") and true or false
         CreateWindow()
+        if NS.InitOptions then
+            NS.InitOptions()
+        end
         for _, e in ipairs(EVENTS) do
             pcall(self.RegisterEvent, self, e)
         end
-        NS.Print("v" .. NS.VERSION .. " loaded. Type |cffffd100/xtm help|r for commands.")
+        if not (self.RegisterUnitEvent and pcall(self.RegisterUnitEvent, self, "UNIT_TARGET", "player", "target", "focus")) then
+            pcall(self.RegisterEvent, self, "UNIT_TARGET")
+        end
+        NS.Print("v" .. NS.VERSION .. " loaded. Type |cffffd100/xtm|r for options or |cffffd100/xtm help|r for commands.")
         return
     end
 
@@ -1592,10 +2366,55 @@ driver:SetScript("OnEvent", function(self, event, arg1)
         return
     end
 
+    if event == "PLAYER_TARGET_CHANGED" or event == "PLAYER_FOCUS_CHANGED" then
+        lastMobGUID = nil
+        lastMobName = nil
+        RequestUpdate(true)
+        return
+    end
+
+    if event == "UNIT_TARGET" then
+        if arg1 == "player" or arg1 == "target" or arg1 == "focus" then
+            lastMobGUID = nil
+            lastMobName = nil
+            RequestUpdate(false)
+        end
+        return
+    end
+
     if event == "UNIT_NAME_UPDATE" then
+        if not arg1 then
+            return
+        end
+        local tracked = identity[arg1] ~= nil
+            or arg1 == "target" or arg1 == "focus"
+            or arg1 == "targettarget" or arg1 == "focustarget"
+            or arg1 == "player" or arg1 == "pet"
+        if not tracked then
+            return
+        end
+        identity[arg1] = nil
+        if arg1 == "target" or arg1 == "focus" or arg1 == "targettarget" or arg1 == "focustarget" then
+            lastMobName = nil
+        end
+        RequestUpdate(false)
+        return
+    end
+
+    if event == "UNIT_PET" then
+        petSerial = petSerial + 1
+        identity["pet"] = nil
+        identity["playerpet"] = nil
+        for i = 1, 4 do
+            identity[PARTYPET[i]] = nil
+        end
+        for i = 1, 40 do
+            identity[RAIDPET[i]] = nil
+        end
         if arg1 then
             identity[arg1] = nil
         end
+        RequestUpdate(not inCombat)
         return
     end
 
@@ -1603,18 +2422,19 @@ driver:SetScript("OnEvent", function(self, event, arg1)
         if testMode or (DB.hidden and not DB.warnEnabled) then
             return
         end
+        if threatDirty and usingOnUpdate and tickElapsed < EVENT_THROTTLE then
+            return
+        end
         -- LIST_UPDATE's unit is the mob. Ignore unrelated nameplates.
         local mob = GetMobUnit()
-        if mob and arg1 and UnitGUID then
-            local eventGUID = UnitGUID(arg1)
-            local mobGUID = UnitGUID(mob)
-            if eventGUID and mobGUID and eventGUID ~= mobGUID then
+        if mob and arg1 then
+            if SameUnit(arg1, mob) == false then
                 return
             end
         elseif not mob and not inCombat then
             return
         end
-        if UnitAffectingCombat("player") then
+        if inCombat or UnitAffectingCombat("player") then
             inCombat = true
             RequestUpdate(false)
         else
@@ -1628,8 +2448,11 @@ driver:SetScript("OnEvent", function(self, event, arg1)
         if testMode or (DB.hidden and not DB.warnEnabled) then
             return
         end
+        if threatDirty and usingOnUpdate and tickElapsed < EVENT_THROTTLE then
+            return
+        end
         -- SITUATION_UPDATE's unit is the player/pet whose status changed.
-        if UnitAffectingCombat("player") then
+        if inCombat or UnitAffectingCombat("player") then
             inCombat = true
             RequestUpdate(false)
         else
@@ -1639,14 +2462,18 @@ driver:SetScript("OnEvent", function(self, event, arg1)
         return
     end
 
-    if event == "GROUP_ROSTER_UPDATE" or event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE" or event == "UNIT_PET" or event == "PLAYER_ENTERING_WORLD" then
+    if event == "GROUP_ROSTER_UPDATE" or event == "PLAYER_ENTERING_WORLD" then
         WipeIdentity()
         if event == "PLAYER_ENTERING_WORLD" then
             testPlayerName = nil
             testPlayerClass = nil
             lastMobGUID = nil
             lastMobName = nil
+            RequestUpdate(true)
+        else
+            RequestUpdate(not inCombat)
         end
+        return
     end
 
     RequestUpdate(true)
@@ -1662,15 +2489,19 @@ SlashCmdList.XIUSTHREATMETER = function(msg)
     if not ui.frame then
         return
     end
-    msg = string.lower(strtrim(msg or ""))
-    if msg == "" or msg == "toggle" then
-        NS.SetHidden(not DB.hidden)
+    msg = ((msg or ""):match("^%s*(.-)%s*$") or ""):lower()
+    if msg == "" or msg == "config" or msg == "options" or msg == "settings" then
+        if NS.OpenOptions then
+            NS.OpenOptions()
+        elseif NS.ToggleOptions then
+            NS.ToggleOptions()
+        end
     elseif msg == "show" then
         NS.SetHidden(false)
     elseif msg == "hide" then
         NS.SetHidden(true)
-    elseif msg == "config" or msg == "options" or msg == "settings" then
-        NS.ToggleOptions()
+    elseif msg == "toggle" then
+        NS.SetHidden(not DB.hidden)
     elseif msg == "test" then
         NS.ToggleTestMode()
     elseif msg == "lock" or msg == "unlock" then
@@ -1680,13 +2511,61 @@ SlashCmdList.XIUSTHREATMETER = function(msg)
     elseif msg == "target" or msg == "focus" then
         NS.SetMode(msg)
         NS.Print("Now tracking threat on your " .. msg .. ".")
+    elseif msg == "check" or msg == "status" then
+        local mob = GetMobUnit()
+        local mobName = "nobody"
+        if mob then
+            local name = UnitName(mob)
+            if IsSecret(name) or not name or name == "" then
+                mobName = "an enemy"
+            else
+                mobName = name
+            end
+        end
+        local where = "not on screen"
+        if DB.hidden then
+            where = "hidden by you"
+        elseif ui.frame:IsShown() then
+            where = DB.minimized and "minimized" or "on screen"
+        end
+        local why = nil
+        if not DB.hidden and not testMode and not ui.frame:IsShown() then
+            if DB.onlyInGroup and not InGroup() then
+                why = "Only show in a group is on, and you are solo."
+            elseif DB.hideOutOfCombat and not UnitAffectingCombat("player") then
+                why = "Hide when out of combat is on."
+            elseif DB.onlyWithThreat and #data == 0 then
+                why = "Only show when there is threat is on, and nobody has threat yet."
+            end
+        end
+        NS.Print("Mode: " .. (DB.mode == "focus" and "focus" or "target") .. ". Window: " .. where .. ". Tracking: " .. mobName .. ".")
+        NS.Print("Combat: " .. (UnitAffectingCombat("player") and "yes" or "no")
+            .. ". Group: " .. (InGroup() and "yes" or "no")
+            .. ". Test mode: " .. (testMode and "on" or "off") .. ".")
+        NS.Print("Threat readout: " .. (UnitDetailedThreatSituation and "available" or "missing")
+            .. ". People on the list: " .. tostring(#data) .. ".")
+        if (playerEntry and playerEntry.secret) or (data[1] and data[1].secret) then
+            NS.Print("Exact threat numbers are hidden by the client right now. Bars still show aggro percent.")
+        end
+        NS.Print("Icons " .. (DB.showIcons and "on" or "off")
+            .. ", pets " .. (DB.showPets and "on" or "off")
+            .. ", numbers " .. (DB.showValues and "on" or "off")
+            .. ", lock " .. (DB.locked and "on" or "off") .. ".")
+        NS.Print("Only with threat " .. (DB.onlyWithThreat and "on" or "off")
+            .. ", hide out of combat " .. (DB.hideOutOfCombat and "on" or "off")
+            .. ", only in a group " .. (DB.onlyInGroup and "on" or "off") .. ".")
+        NS.Print("Warning " .. (DB.warnEnabled and "on" or "off") .. " at " .. tostring(floor(DB.warnThreshold + 0.5)) .. "%.")
+        if why then
+            NS.Print(why)
+        end
     else
         NS.Print("Commands:")
-        NS.Print("  /xtm - show or hide the window")
-        NS.Print("  /xtm config - open settings")
+        NS.Print("  /xtm - open settings")
+        NS.Print("  /xtm show | hide | toggle - show or hide the threat window")
         NS.Print("  /xtm test - toggle test bars")
         NS.Print("  /xtm lock - lock or unlock the window")
         NS.Print("  /xtm target | focus - choose which enemy to track")
         NS.Print("  /xtm reset - reset window position and size")
+        NS.Print("  /xtm check - show whether each option is on and why the window may be hidden")
     end
 end

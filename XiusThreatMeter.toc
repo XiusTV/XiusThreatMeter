@@ -1,11 +1,12 @@
-## Interface: 16001
+## Interface: 120105, 16001
 ## Title: Xius Threat Meter
-## Notes: Group threat meter styled like the built-in damage meter. Type /xtm
+## Notes: Group threat meter for Modern and WoW Forever. Type /xtm
 ## Author: Xius
-## Version: 1.5.3
+## Version: 1.6.1
 ## SavedVariables: XiusThreatMeterDB
 ## IconTexture: Interface\Icons\Ability_Warrior_Challange
 ## Category: Combat
+## AllowLoadGameType: standard, forever, camelot
 
 Config.lua
 Core.lua

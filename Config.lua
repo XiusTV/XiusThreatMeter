@@ -5,7 +5,7 @@
 
 local ADDON, NS = ...
 
-NS.VERSION = "1.5.3"
+NS.VERSION = "1.6.1"
 NS.STYLE_VERSION = 6
 NS.FONT = STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF"
 NS.WHITE = "Interface\\Buttons\\WHITE8X8"
@@ -107,6 +107,17 @@ function NS.ResetLayout()
     db.hidden = false
 end
 
+function NS.ResetDefaults()
+    local db = NS.db
+    if not db then
+        return
+    end
+    for k, v in pairs(NS.DEFAULTS) do
+        db[k] = CopyValue(v)
+    end
+    db.styleVersion = NS.STYLE_VERSION
+end
+
 ----------------------------------------------------------------------
 -- Drawing helpers
 ----------------------------------------------------------------------
@@ -142,21 +153,33 @@ function NS.SolidTexture(parent, layer, sublevel, c, a)
 end
 
 -- orientation "VERTICAL": c1 = bottom, c2 = top. "HORIZONTAL": c1 = left, c2 = right.
+local gradientMode -- 1 = SetGradient(CreateColor), 2 = SetGradientAlpha, 3 = SetVertexColor
+
+local function ApplyRawGradient(tex, orientation, r1, g1, b1, a1, r2, g2, b2, a2)
+    if not gradientMode then
+        if CreateColor and tex.SetGradient and pcall(tex.SetGradient, tex, orientation, CreateColor(r1, g1, b1, a1), CreateColor(r2, g2, b2, a2)) then
+            gradientMode = 1
+            return
+        elseif tex.SetGradientAlpha and pcall(tex.SetGradientAlpha, tex, orientation, r1, g1, b1, a1, r2, g2, b2, a2) then
+            gradientMode = 2
+            return
+        else
+            gradientMode = 3
+        end
+    end
+    if gradientMode == 1 then
+        tex:SetGradient(orientation, CreateColor(r1, g1, b1, a1), CreateColor(r2, g2, b2, a2))
+    elseif gradientMode == 2 then
+        tex:SetGradientAlpha(orientation, r1, g1, b1, a1, r2, g2, b2, a2)
+    else
+        tex:SetVertexColor(r2, g2, b2, a2)
+    end
+end
+
 function NS.SetGradient(tex, orientation, c1, a1, c2, a2)
     tex:SetTexture(NS.WHITE)
     tex:SetVertexColor(1, 1, 1, 1)
-    if CreateColor and tex.SetGradient then
-        local ok = pcall(tex.SetGradient, tex, orientation,
-            CreateColor(c1[1], c1[2], c1[3], a1), CreateColor(c2[1], c2[2], c2[3], a2))
-        if ok then
-            return
-        end
-    end
-    if tex.SetGradientAlpha then
-        tex:SetGradientAlpha(orientation, c1[1], c1[2], c1[3], a1, c2[1], c2[2], c2[3], a2)
-    else
-        tex:SetVertexColor(c2[1], c2[2], c2[3], a2)
-    end
+    ApplyRawGradient(tex, orientation, c1[1], c1[2], c1[3], a1, c2[1], c2[2], c2[3], a2)
 end
 
 function NS.CreateWindowBackground(frame)
@@ -381,18 +404,7 @@ local GOLD_TOP = { 1, 0.88, 0 }
 local GOLD_BOTTOM = { 0.90, 0.60, 0 }
 
 local function ApplyGradient(t, orientation, c1, c2)
-    if CreateColor and t.SetGradient then
-        local ok = pcall(t.SetGradient, t, orientation,
-            CreateColor(c1[1], c1[2], c1[3], c1[4] or 1), CreateColor(c2[1], c2[2], c2[3], c2[4] or 1))
-        if ok then
-            return
-        end
-    end
-    if t.SetGradientAlpha then
-        t:SetGradientAlpha(orientation, c1[1], c1[2], c1[3], c1[4] or 1, c2[1], c2[2], c2[3], c2[4] or 1)
-    else
-        t:SetVertexColor(c2[1], c2[2], c2[3], c2[4] or 1)
-    end
+    ApplyRawGradient(t, orientation, c1[1], c1[2], c1[3], c1[4] or 1, c2[1], c2[2], c2[3], c2[4] or 1)
 end
 
 local function Circle(parent, size, sublevel, bottom, top)
