@@ -2,6 +2,20 @@
 
 All notable changes to Xius Threat Meter are documented here.
 
+## [1.6.2] - 2026-11-16
+
+### Added
+- Xius Core is required. Settings open in the Xius Core window, and the meter uses the same saved table as Xius Core profiles.
+- Font size, bar texture (Blizzard, Flat, or Raid), and aggro role (Auto, Tank, or DPS / Healer).
+- The title turns amber before the pull warning turns it red. Tank role warns when someone else contests or takes aggro.
+
+### Changed
+- `/xtm` opens the Threat Meter page in Xius Core.
+- The addon stops loading if Xius Core is not installed, instead of erroring.
+
+### Improved
+- Group membership is checked once per update. Threat per second is measured only while threat numbers are shown.
+
 ## [1.6.1] - 2026-11-04
 
 ### Added

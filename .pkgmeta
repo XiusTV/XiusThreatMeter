@@ -1,0 +1,4 @@
+package-as: XiusThreatMeter
+
+required-dependencies:
+  - xius-core

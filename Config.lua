@@ -5,21 +5,34 @@
 
 local ADDON, NS = ...
 
-NS.VERSION = "1.6.1"
-NS.STYLE_VERSION = 6
+local XiusCore = _G.XiusCore or _G.XiusUI or _G.XiusCoreSettingsLib
+if not XiusCore and C_AddOns and C_AddOns.IsAddOnLoaded then
+    local ok, loaded = pcall(C_AddOns.IsAddOnLoaded, "XiusCore")
+    XiusCore = ok and loaded and true or false
+end
+if not XiusCore and IsAddOnLoaded then
+    local ok, loaded = pcall(IsAddOnLoaded, "XiusCore")
+    XiusCore = ok and loaded and true or false
+end
+if not XiusCore then
+    return
+end
+
+NS.VERSION = "1.6.2"
+NS.STYLE_VERSION = 9
 NS.FONT = STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF"
 NS.WHITE = "Interface\\Buttons\\WHITE8X8"
 
 NS.COLOR = {
-    gold = { 1, 0.847, 0, 1 },
-    goldLine = { 0.72, 0.57, 0, 1 },
-    goldLineDim = { 0.34, 0.27, 0.01, 1 },
-    glow = { 0.25, 0.15, 0.045 },
+    gold = { 1, 209 / 255, 0, 1 },
+    goldLine = { 1, 0.82, 0.35, 1 },
+    goldLineDim = { 0.55, 0.42, 0.16, 1 },
+    glow = { 0.22, 0.16, 0.08 },
     window = { 0, 0, 0 },
-    buttonEdge = { 0.56, 0.42, 0.24, 1 },
-    dash = { 0.88, 0.66, 0, 1 },
-    rowEdge = { 0.23, 0.20, 0.196, 1 },
-    menuBg = { 0.03, 0.03, 0.03, 0.96 },
+    buttonEdge = { 1, 0.82, 0.35, 1 },
+    dash = { 1, 0.82, 0.35, 1 },
+    rowEdge = { 0.05, 0.05, 0.06, 1 },
+    menuBg = { 0.06, 0.06, 0.08, 0.98 },
     text = { 1, 1, 1, 1 },
     muted = { 0.62, 0.60, 0.56, 1 },
     pet = { 0.35, 0.75, 0.35 },
@@ -35,7 +48,7 @@ NS.DEFAULTS = {
     minimized = false,
     mode = "target",
     scale = 1,
-    bgAlpha = 0.45,
+    bgAlpha = 1,
     barHeight = 19,
     barSpacing = 2,
     showIcons = true,
@@ -46,23 +59,34 @@ NS.DEFAULTS = {
     onlyInGroup = false,
     warnEnabled = true,
     warnThreshold = 90,
+    fontSize = 11,
+    barTexture = "blizzard",
+    roleMode = "auto",
 }
 
+NS.HUD_BORDER = { 1, 0.80, 0.32, 1 }
+NS.HUD_OUTER = { 0, 0, 0, 1 }
+NS.HEADER_BACKDROP = {
+    bgFile = NS.WHITE,
+    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+    tile = false,
+    edgeSize = 12,
+    insets = { left = 4, right = 4, top = 4, bottom = 4 },
+}
+NS.HEADER_BUTTON_BACKDROP = {
+    bgFile = NS.WHITE,
+    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+    tile = false,
+    edgeSize = 8,
+    insets = { left = 3, right = 3, top = 3, bottom = 3 },
+}
+NS.BUTTON_BORDER = { 140 / 255, 114 / 255, 66 / 255, 1 }
 NS.BACKDROP_MENU = {
     bgFile = NS.WHITE,
     edgeFile = NS.WHITE,
     tile = false,
     edgeSize = 1,
     insets = { left = 1, right = 1, top = 1, bottom = 1 },
-}
-
-NS.BACKDROP_SLIDER = {
-    bgFile = "Interface\\Buttons\\UI-SliderBar-Background",
-    edgeFile = "Interface\\Buttons\\UI-SliderBar-Border",
-    tile = true,
-    tileSize = 8,
-    edgeSize = 8,
-    insets = { left = 3, right = 3, top = 6, bottom = 6 },
 }
 
 NS.BACKDROP_TEMPLATE = BackdropTemplateMixin and "BackdropTemplate" or nil
@@ -78,22 +102,64 @@ local function CopyValue(v)
     return t
 end
 
-function NS.InitDB()
+-- Xius Core keeps this addon's settings on XiusUIDB.threat and copies that
+-- table when a profile changes. Saved variables then replace the global, so
+-- rejoin the two tables here. The meter table is what the last session saved.
+function NS.BindCoreDB()
     if type(XiusThreatMeterDB) ~= "table" then
         XiusThreatMeterDB = {}
     end
-    local db = XiusThreatMeterDB
+    if not (XiusUI and type(XiusUIDB) == "table") then
+        return XiusThreatMeterDB
+    end
+    if type(XiusUIDB.threat) ~= "table" then
+        XiusUIDB.threat = {}
+    end
+    local core = XiusUIDB.threat
+    local live = XiusThreatMeterDB
+    if live ~= core then
+        local coreHas = next(core) ~= nil
+        local liveHas = next(live) ~= nil
+        if liveHas or not coreHas then
+            for key in pairs(core) do
+                core[key] = nil
+            end
+            for key, value in pairs(live) do
+                core[key] = value
+            end
+        end
+        XiusThreatMeterDB = core
+    end
+    return XiusThreatMeterDB
+end
+
+function NS.EnsureDefaults(db)
+    db = db or NS.db
+    if type(db) ~= "table" then
+        return
+    end
     for k, v in pairs(NS.DEFAULTS) do
         if db[k] == nil then
             db[k] = CopyValue(v)
         end
     end
-    if db.styleVersion ~= NS.STYLE_VERSION then
-        db.bgAlpha = NS.DEFAULTS.bgAlpha
-        db.barHeight = NS.DEFAULTS.barHeight
-        db.onlyWithThreat = NS.DEFAULTS.onlyWithThreat
-        db.hidden = false
+end
+
+function NS.InitDB()
+    local db = NS.BindCoreDB()
+    NS.EnsureDefaults(db)
+    if (db.styleVersion or 0) < NS.STYLE_VERSION then
         db.styleVersion = NS.STYLE_VERSION
+    end
+    if not db.migratedBlizzardSkinV2 then
+        if type(db.bgAlpha) == "number" and db.bgAlpha < 0.95 then
+            db.bgAlpha = 1
+        end
+        if type(db.bgOpacity) == "number" and db.bgOpacity < 0.95 then
+            db.bgOpacity = 1
+            db.bgAlpha = 1
+        end
+        db.migratedBlizzardSkinV2 = true
     end
     NS.db = db
 end
@@ -129,6 +195,38 @@ function NS.ApplyBackdrop(frame, backdrop, bg, border)
     frame:SetBackdrop(backdrop)
     frame:SetBackdropColor(bg[1], bg[2], bg[3], bg[4] or 1)
     frame:SetBackdropBorderColor(border[1], border[2], border[3], border[4] or 1)
+end
+
+function NS.ApplyHudChrome(frame)
+    if not frame or frame._xiusHudEdge then
+        return
+    end
+    if frame.SetBackdrop then
+        frame:SetBackdrop(nil)
+    end
+    local function Line()
+        local line = frame:CreateTexture(nil, "OVERLAY")
+        line:SetTexture(NS.WHITE)
+        line:SetVertexColor(0, 0, 0, 1)
+        return line
+    end
+    local top = Line()
+    top:SetHeight(1)
+    top:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
+    top:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, 0)
+    local bottom = Line()
+    bottom:SetHeight(1)
+    bottom:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 0, 0)
+    bottom:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
+    local left = Line()
+    left:SetWidth(1)
+    left:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
+    left:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 0, 0)
+    local right = Line()
+    right:SetWidth(1)
+    right:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, 0)
+    right:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
+    frame._xiusHudEdge = true
 end
 
 function NS.SetFont(fs, size, flags)
@@ -182,9 +280,10 @@ function NS.SetGradient(tex, orientation, c1, a1, c2, a2)
     ApplyRawGradient(tex, orientation, c1[1], c1[2], c1[3], a1, c2[1], c2[2], c2[3], a2)
 end
 
-function NS.CreateWindowBackground(frame)
+function NS.CreateWindowBackground(frame, headerHeight)
     frame.bgTex = frame:CreateTexture(nil, "BACKGROUND", nil, -8)
-    frame.bgTex:SetAllPoints()
+    frame.bgTex:SetPoint("TOPLEFT", frame, "TOPLEFT", 1, -(headerHeight or 25))
+    frame.bgTex:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -1, 1)
 end
 
 function NS.SetWindowAlpha(frame, alpha)
@@ -238,50 +337,71 @@ function NS.ColorFadedStrip(strip, color, alpha, midBottom, midTop)
     end
 end
 
--- Builds the gold-accented title bar used by the meter and the settings window.
+-- 25px Damage Done header: rounded gold-bronze tooltip frame over a warm metallic fill.
 function NS.CreateTitleBar(frame, height)
-    local bar = CreateFrame("Frame", nil, frame)
+    local bar = CreateFrame("Frame", nil, frame, NS.BACKDROP_TEMPLATE)
     bar:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
     bar:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, 0)
     bar:SetHeight(height)
+    if bar.SetBackdrop then
+        bar:SetBackdrop(NS.HEADER_BACKDROP)
+        bar:SetBackdropColor(0.12, 0.10, 0.05, 0.98)
+        bar:SetBackdropBorderColor(1, 0.80, 0.32, 1)
+    end
 
-    local C = NS.COLOR
-    local topInset = 2
+    local fill = bar:CreateTexture(nil, "BACKGROUND", nil, 1)
+    fill:SetPoint("TOPLEFT", bar, "TOPLEFT", 4, -4)
+    fill:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT", -4, 4)
+    NS.SetGradient(fill, "VERTICAL", { 0.09, 0.07, 0.04 }, 0.98, { 0.16, 0.13, 0.07 }, 0.98)
 
-    -- One full-width vertical glow. Side-faded strips used to leave a washed
-    -- horizontal band across the right half of the header.
-    local glowHeight = math.max(7, math.floor(height * 0.48))
-    bar.glow = bar:CreateTexture(nil, "BACKGROUND", nil, 1)
-    bar.glow:SetTexture(NS.WHITE)
-    bar.glow:SetPoint("BOTTOMLEFT", bar, "BOTTOMLEFT", 0, 1)
-    bar.glow:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT", 0, 1)
-    bar.glow:SetHeight(glowHeight)
-    NS.SetGradient(bar.glow, "VERTICAL", C.glow, 0.88, C.glow, 0)
-
-    bar.topLine = NS.CreateFadedStrip(bar, "BORDER", 1, 36)
-    NS.AnchorFadedStrip(bar.topLine, bar, -topInset, 1)
-    NS.ColorFadedStrip(bar.topLine, C.goldLineDim, 1)
-
-    bar.bottomLine = NS.CreateFadedStrip(bar, "BORDER", 1, 36)
-    NS.AnchorFadedStrip(bar.bottomLine, bar, -(height - 1), 1)
-    NS.ColorFadedStrip(bar.bottomLine, C.goldLine, 1)
-
+    local goldLine = bar:CreateTexture(nil, "OVERLAY")
+    goldLine:SetTexture(NS.WHITE)
+    goldLine:SetPoint("BOTTOMLEFT", bar, "BOTTOMLEFT", 0, 0)
+    goldLine:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT", 0, 0)
+    goldLine:SetHeight(1)
+    goldLine:SetVertexColor(0.82, 0.66, 0.22, 0.95)
     return bar
+end
+
+function NS.StyleHeaderButton(b, kind)
+    if kind == true then
+        kind = "red"
+    end
+    if not b.SetBackdrop then
+        NS.StyleButton(b, kind)
+        return
+    end
+    b:SetBackdrop(NS.HEADER_BUTTON_BACKDROP)
+    if kind == "red" then
+        b:SetBackdropColor(0.82, 0.08, 0.08, 1)
+    elseif kind == "dark" then
+        b:SetBackdropColor(0.12, 0.11, 0.09, 0.95)
+    else
+        b:SetBackdropColor(0.20, 0.14, 0.06, 1)
+    end
+    local edge = NS.BUTTON_BORDER
+    b:SetBackdropBorderColor(edge[1], edge[2], edge[3], edge[4] or 1)
+    local hl = b:CreateTexture(nil, "HIGHLIGHT")
+    hl:SetTexture(NS.WHITE)
+    hl:SetPoint("TOPLEFT", b, "TOPLEFT", 3, -3)
+    hl:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", -3, 3)
+    hl:SetVertexColor(1, 0.85, 0.4, 0.16)
+    hl:SetBlendMode("ADD")
 end
 
 -- Button skins: 1px rim with rounded corners, dark inner line, bevelled fill.
 local BUTTON_SKINS = {
     bronze = {
-        rimTop = { 0.60, 0.47, 0.30 }, rimBottom = { 0.30, 0.20, 0.09 },
-        fillTop = { 0.23, 0.23, 0.23 }, fillBottom = { 0.075, 0.075, 0.075 },
-        bevelTop = { 0.39, 0.39, 0.39 }, bevelTop2 = { 0.33, 0.33, 0.33 },
-        bevelLeftTop = { 0.41, 0.41, 0.41 }, bevelLeftBottom = { 0.29, 0.29, 0.29 },
+        rimTop = { 0.55, 0.42, 0.22 }, rimBottom = { 0.22, 0.15, 0.07 },
+        fillTop = { 0.28, 0.20, 0.10 }, fillBottom = { 0.10, 0.07, 0.04 },
+        bevelTop = { 0.48, 0.36, 0.16 }, bevelTop2 = { 0.32, 0.23, 0.10 },
+        bevelLeftTop = { 0.40, 0.30, 0.14 }, bevelLeftBottom = { 0.16, 0.11, 0.05 },
     },
     grey = {
-        rimTop = { 0.55, 0.55, 0.55 }, rimBottom = { 0.29, 0.29, 0.29 },
-        fillTop = { 0.23, 0.23, 0.23 }, fillBottom = { 0.075, 0.075, 0.075 },
-        bevelTop = { 0.38, 0.38, 0.38 }, bevelTop2 = { 0.24, 0.24, 0.24 },
-        bevelLeftTop = { 0.29, 0.29, 0.29 }, bevelLeftBottom = { 0.18, 0.18, 0.18 },
+        rimTop = { 0.55, 0.42, 0.22 }, rimBottom = { 0.22, 0.15, 0.07 },
+        fillTop = { 0.28, 0.20, 0.10 }, fillBottom = { 0.10, 0.07, 0.04 },
+        bevelTop = { 0.48, 0.36, 0.16 }, bevelTop2 = { 0.32, 0.23, 0.10 },
+        bevelLeftTop = { 0.40, 0.30, 0.14 }, bevelLeftBottom = { 0.16, 0.11, 0.05 },
     },
     red = {
         rimTop = { 0.55, 0.45, 0.34 }, rimBottom = { 0.40, 0.30, 0.20 },
@@ -431,7 +551,7 @@ end
 -- Gold cog: finer teeth and a clearer center hole, closer to the default UI.
 function NS.CreateGearGlyph(button)
     local g = CreateFrame("Frame", nil, button)
-    g:SetSize(13, 13)
+    g:SetSize(12, 12)
     g:SetPoint("CENTER", button, "CENTER", 0, 0)
     local shadow = { 0, 0, 0, 0.5 }
     for i = 0, 7 do
@@ -442,13 +562,13 @@ function NS.CreateGearGlyph(button)
             GOLD_BOTTOM[2] + (GOLD_TOP[2] - GOLD_BOTTOM[2]) * mix,
             0,
         }
-        Tooth(g, 3.0, 2.2, 0, angle, 5.2, shadow)
-        Tooth(g, 2.3, 1.6, 2, angle, 5.2, toothColor)
+        Tooth(g, 2.4, 1.8, 0, angle, 4.4, shadow)
+        Tooth(g, 1.8, 1.3, 2, angle, 4.4, toothColor)
     end
-    Circle(g, 10.5, 1, shadow)
-    Circle(g, 9.5, 3, GOLD_BOTTOM, GOLD_TOP)
-    Circle(g, 5.8, 4, { 0.07, 0.07, 0.07 })
-    Circle(g, 3.0, 5, GOLD_BOTTOM, GOLD_TOP)
+    Circle(g, 8.6, 1, shadow)
+    Circle(g, 7.6, 3, GOLD_BOTTOM, GOLD_TOP)
+    Circle(g, 4.6, 4, { 0.07, 0.07, 0.07 })
+    Circle(g, 2.4, 5, GOLD_BOTTOM, GOLD_TOP)
     return g
 end
 

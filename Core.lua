@@ -5,6 +5,19 @@
 
 local ADDON, NS = ...
 
+local XiusCore = _G.XiusCore or _G.XiusUI or _G.XiusCoreSettingsLib
+if not XiusCore and C_AddOns and C_AddOns.IsAddOnLoaded then
+    local ok, loaded = pcall(C_AddOns.IsAddOnLoaded, "XiusCore")
+    XiusCore = ok and loaded and true or false
+end
+if not XiusCore and IsAddOnLoaded then
+    local ok, loaded = pcall(IsAddOnLoaded, "XiusCore")
+    XiusCore = ok and loaded and true or false
+end
+if not XiusCore then
+    return
+end
+
 local COLOR = NS.COLOR
 local WHITE = NS.WHITE
 local TEMPLATE = NS.BACKDROP_TEMPLATE
@@ -12,12 +25,14 @@ local TEMPLATE = NS.BACKDROP_TEMPLATE
 local CLASS_TEXTURE = "Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Classes"
 local CHECK_TEXTURE = "Interface\\Buttons\\UI-CheckBox-Check"
 
--- Match the built-in Damage Done meter header (compact gold bar + buttons).
-local TITLE_HEIGHT = 24
-local BUTTON_SIZE = 18
-local BUTTON_GAP = 4
-local SIDE_PAD = 5
-local BODY_TOP_GAP = 2
+-- Match the built-in Damage Done meter: 28px olive-bronze header, black body, 22px buttons.
+local TITLE_HEIGHT = 28
+local HUD_INSET = 1
+local FRAME_CHROME = TITLE_HEIGHT
+local BUTTON_SIZE = 22
+local BUTTON_GAP = 3
+local SIDE_PAD = 4
+local BODY_TOP_GAP = 0
 local MIN_WIDTH, MAX_WIDTH = 170, 600
 local MIN_HEIGHT, MAX_HEIGHT = 80, 800
 local MAX_ROWS = 40
@@ -66,6 +81,7 @@ local FALLBACK_CLASS_COLORS = {
 local UnitDetailedThreatSituation = _G.UnitDetailedThreatSituation
 local UnitThreatSituation = _G.UnitThreatSituation
 local issecretvalue = _G.issecretvalue
+local canaccessvalue = _G.canaccessvalue
 local UnitExists = _G.UnitExists
 local UnitIsVisible = _G.UnitIsVisible
 local UnitName = _G.UnitName
@@ -115,11 +131,29 @@ local SyncDriver
 local RequestUpdate
 local CheckWarning
 
-local checkSecret = issecretvalue ~= nil
-
 -- Secret numbers can be drawn by widgets. They cannot be compared, sorted, or concatenated.
 local function IsSecret(v)
-    return checkSecret and issecretvalue(v)
+    if v == nil then
+        return false
+    end
+    if issecretvalue and issecretvalue(v) then
+        return true
+    end
+    if canaccessvalue and not canaccessvalue(v) then
+        return true
+    end
+    return false
+end
+
+local function PlayerInCombat()
+    if not UnitAffectingCombat then
+        return false
+    end
+    local state = UnitAffectingCombat("player")
+    if state == nil or IsSecret(state) then
+        return inCombat and true or false
+    end
+    return state and true or false
 end
 
 local function IsNumberLike(v)
@@ -164,6 +198,36 @@ local function FormatValue(n)
     return tostring(floor(n + 0.5))
 end
 
+local threatRate = {}
+
+local function NoteThreatRate(unit, value)
+    if not unit or type(value) ~= "number" then
+        return 0
+    end
+    local now = GetTime()
+    local sample = threatRate[unit]
+    if not sample then
+        threatRate[unit] = { value = value, time = now, tps = 0 }
+        return 0
+    end
+    local dt = now - sample.time
+    if dt >= 0.75 then
+        local gained = value - sample.value
+        if gained < 0 then
+            gained = 0
+        end
+        local instant = gained / dt
+        if sample.tps > 0 then
+            sample.tps = sample.tps * 0.65 + instant * 0.35
+        else
+            sample.tps = instant
+        end
+        sample.value = value
+        sample.time = now
+    end
+    return sample.tps
+end
+
 local function QuantizeValue(n)
     if n >= 1000000 then
         return floor(n / 10000 + 0.5) * 10000
@@ -204,14 +268,21 @@ local function SanitizeDB()
         return n
     end
     DB.scale = SnapStep(DB.scale, 0.05, 0.5, 2, 1)
-    DB.bgAlpha = SnapStep(DB.bgAlpha, 0.05, 0, 1, 0.45)
+    DB.bgAlpha = SnapStep(DB.bgAlpha, 0.05, 0, 1, 1)
     DB.barHeight = SnapStep(DB.barHeight, 1, 12, 32, 19)
     DB.barSpacing = SnapStep(DB.barSpacing, 1, 0, 8, 2)
     DB.width = SnapStep(DB.width, 1, MIN_WIDTH, MAX_WIDTH, 250)
     DB.height = SnapStep(DB.height, 1, MIN_HEIGHT, MAX_HEIGHT, 190)
     DB.warnThreshold = SnapStep(DB.warnThreshold, 5, 50, 100, 90)
+    DB.fontSize = SnapStep(DB.fontSize, 1, 8, 18, 11)
     if DB.mode ~= "focus" and DB.mode ~= "target" then
         DB.mode = "target"
+    end
+    if DB.barTexture ~= "flat" and DB.barTexture ~= "raid" then
+        DB.barTexture = "blizzard"
+    end
+    if DB.roleMode ~= "tank" and DB.roleMode ~= "dps" then
+        DB.roleMode = "auto"
     end
     local function Flag(v)
         return v and true or false
@@ -287,6 +358,18 @@ local function InGroup()
         end
     end
     return false
+end
+
+local rosterMode = "solo"
+
+local function RefreshRoster()
+    if InRaid() then
+        rosterMode = "raid"
+    elseif InGroup() then
+        rosterMode = "party"
+    else
+        rosterMode = "solo"
+    end
 end
 
 local function ShowTooltip(owner, title, line)
@@ -374,6 +457,9 @@ local function WipeIdentity()
     petSerial = petSerial + 1
     for unit in pairs(identity) do
         identity[unit] = nil
+    end
+    for unit in pairs(threatRate) do
+        threatRate[unit] = nil
     end
 end
 
@@ -537,12 +623,10 @@ local function SortData(a, b)
     if a.isTanking ~= b.isTanking then
         return a.isTanking and not b.isTanking
     end
-    local aNameSecret = IsSecret(a.name)
-    local bNameSecret = IsSecret(b.name)
-    if aNameSecret ~= bNameSecret then
-        return not aNameSecret
+    if a.nameSecret ~= b.nameSecret then
+        return not a.nameSecret
     end
-    if not aNameSecret then
+    if not a.nameSecret then
         local an = a.name or ""
         local bn = b.name or ""
         if an ~= bn then
@@ -690,6 +774,7 @@ local function AddUnit(unit, mob, isPet)
     end
     e.unit = unit
     e.name = id.name
+    e.nameSecret = IsSecret(id.name)
     e.class = id.class
     e.isPet = isPet
     e.isPlayer = id.isPlayer and true or false
@@ -741,6 +826,11 @@ local function AddUnit(unit, mob, isPet)
         end
         e.value = value
     end
+    if DB.showValues and type(e.value) == "number" and not valuesSecret then
+        e.tps = NoteThreatRate(unit, e.value)
+    else
+        e.tps = 0
+    end
     if isPet then
         local c = COLOR.pet
         e.r, e.g, e.b = c[1], c[2], c[3]
@@ -771,7 +861,7 @@ local function CollectThreat(mob)
     if pets or DB.warnEnabled then
         AddUnit("pet", mob, true)
     end
-    if InRaid() then
+    if rosterMode == "raid" then
         -- Raid unit ids are not always packed into 1..count, so check every slot.
         -- Empty slots stop at UnitExists and never call the threat API.
         for i = 1, 40 do
@@ -780,7 +870,7 @@ local function CollectThreat(mob)
                 AddUnit(RAIDPET[i], mob, true)
             end
         end
-    elseif InGroup() then
+    elseif rosterMode == "party" then
         for i = 1, 4 do
             AddUnit(PARTY[i], mob, false)
             if pets then
@@ -848,6 +938,7 @@ local function BuildTestData()
         end
         e.unit = nil
         e.name = name
+        e.nameSecret = false
         e.class = class
         e.isPet = false
         e.isPlayer = isPlayer
@@ -874,6 +965,7 @@ local function BuildTestData()
         end
         e.unit = hasPet and "pet" or nil
         e.name = testPlayerName .. "'s Pet"
+        e.nameSecret = false
         e.class = nil
         e.isPet = true
         e.isPlayer = false
@@ -899,6 +991,7 @@ local function BuildTestData()
         e.isTanking = (i == 1)
         e.pct = min(100, e.value / top * 100)
         e.rawPct = e.pct
+        e.tps = floor(e.value * 0.035 + 0.5)
     end
 end
 
@@ -949,7 +1042,55 @@ local function Row_OnLeave(self)
     HideTooltip()
 end
 
--- Grey outer line + black inner line, like the bar frames on the damage meter.
+local function BarTexturePath()
+    local choice = DB and DB.barTexture
+    if choice == "flat" then
+        return WHITE
+    end
+    if choice == "raid" then
+        return "Interface\\RaidFrame\\Raid-Bar-Hp-Fill"
+    end
+    return "Interface\\TargetingFrame\\UI-StatusBar"
+end
+
+local function ApplyRowChrome(row)
+    if not row or not row.bar then
+        return
+    end
+    local tex = BarTexturePath()
+    if row.barTex ~= tex then
+        row.barTex = tex
+        row.bar:SetStatusBarTexture(tex)
+        row.bar.bg:SetTexture(tex)
+        row.cr, row.cg, row.cb = nil, nil, nil
+    end
+    local size = (DB and DB.fontSize) or 11
+    if row.fontSize ~= size then
+        row.fontSize = size
+        NS.SetFont(row.name, size, "")
+        NS.SetFont(row.value, size, "")
+        row.name:SetTextColor(1, 1, 1, 1)
+        row.value:SetTextColor(1, 1, 1, 1)
+    end
+end
+
+local function ApplyAllRowChrome()
+    for i = 1, #ui.rows do
+        ApplyRowChrome(ui.rows[i])
+    end
+end
+
+local function CropIcon(tex, coords)
+    if coords then
+        local left, right, top, bottom = coords[1], coords[2], coords[3], coords[4]
+        local dx = (right - left) * 0.08
+        local dy = (bottom - top) * 0.08
+        tex:SetTexCoord(left + dx, right - dx, top + dy, bottom - dy)
+    else
+        tex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    end
+end
+
 local function CreateFramedBox(parent)
     local box = {}
     box.edge = NS.SolidTexture(parent, "BACKGROUND", 0, COLOR.rowEdge)
@@ -978,21 +1119,25 @@ local function CreateRow(index)
     row.icon = row.iconSlot:CreateTexture(nil, "ARTWORK")
     row.icon:SetPoint("TOPLEFT", row.iconSlot, "TOPLEFT", 1, -1)
     row.icon:SetPoint("BOTTOMRIGHT", row.iconSlot, "BOTTOMRIGHT", -1, 1)
+    row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
 
     row.barSlot = CreateFrame("Frame", nil, row)
     row.barBox = CreateFramedBox(row.barSlot)
     AnchorFramedBox(row.barBox, row.barSlot, row.barSlot)
 
     row.bar = CreateFrame("StatusBar", nil, row.barSlot)
-    row.bar:SetPoint("TOPLEFT", row.barSlot, "TOPLEFT", 2, -2)
-    row.bar:SetPoint("BOTTOMRIGHT", row.barSlot, "BOTTOMRIGHT", -2, 2)
-    row.bar:SetStatusBarTexture(WHITE)
+    row.bar:SetPoint("TOPLEFT", row.barSlot, "TOPLEFT", 1, -1)
+    row.bar:SetPoint("BOTTOMRIGHT", row.barSlot, "BOTTOMRIGHT", -1, 1)
     row.bar:SetMinMaxValues(0, 1)
     row.bar:SetValue(0)
 
     row.bar.bg = row.bar:CreateTexture(nil, "BACKGROUND")
-    row.bar.bg:SetTexture(WHITE)
     row.bar.bg:SetAllPoints()
+
+    row.gloss = row.barSlot:CreateTexture(nil, "ARTWORK", nil, 2)
+    row.gloss:SetPoint("TOPLEFT", row.barSlot, "TOPLEFT", 1, -1)
+    row.gloss:SetPoint("BOTTOMRIGHT", row.barSlot, "BOTTOMRIGHT", -1, 1)
+    NS.SetGradient(row.gloss, "VERTICAL", { 0, 0, 0 }, 0.32, { 1, 1, 1 }, 0.20)
 
     row.textLayer = CreateFrame("Frame", nil, row.barSlot)
     row.textLayer:SetAllPoints(row.barSlot)
@@ -1001,17 +1146,16 @@ local function CreateRow(index)
     row.name = row.textLayer:CreateFontString(nil, "OVERLAY")
     row.name:SetJustifyH("LEFT")
     row.name:SetWordWrap(false)
-    row.name:SetTextColor(1, 1, 1)
 
     row.value = row.textLayer:CreateFontString(nil, "OVERLAY")
     row.value:SetJustifyH("RIGHT")
     row.value:SetWordWrap(false)
-    row.value:SetTextColor(1, 1, 1)
 
     row.name:SetPoint("LEFT", row.barSlot, "LEFT", 4, 0)
     row.name:SetPoint("RIGHT", row.value, "LEFT", -4, 0)
     row.value:SetPoint("RIGHT", row.barSlot, "RIGHT", -3, 0)
 
+    ApplyRowChrome(row)
     row:Hide()
     ui.rows[index] = row
     return row
@@ -1037,7 +1181,7 @@ local function LayoutRow(row, index)
             row.iconSlot:SetPoint("TOPLEFT", row, "TOPLEFT", 0, 0)
             row.iconSlot:SetSize(h, h)
             row.iconSlot:Show()
-            row.barSlot:SetPoint("TOPLEFT", row.iconSlot, "TOPRIGHT", 1, 0)
+            row.barSlot:SetPoint("TOPLEFT", row.iconSlot, "TOPRIGHT", 0, 0)
         else
             row.iconSlot:Hide()
             row.barSlot:SetPoint("TOPLEFT", row, "TOPLEFT", 0, 0)
@@ -1045,12 +1189,6 @@ local function LayoutRow(row, index)
         row.barSlot:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", 0, 0)
         row.layoutIcons = icons
         row.iconSize = h
-    end
-    local size = max(9, min(15, floor(h * 0.6)))
-    if row.fontSize ~= size then
-        NS.SetFont(row.name, size, "OUTLINE")
-        NS.SetFont(row.value, size, "OUTLINE")
-        row.fontSize = size
     end
 end
 
@@ -1114,7 +1252,7 @@ local function SetRowIcon(row, e)
                 drawn = pcall(SetPortraitTexture, row.icon, e.unit)
             end
             if drawn then
-                row.icon:SetTexCoord(0.1, 0.9, 0.1, 0.9)
+                row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
             else
                 row.icon:SetTexture("Interface\\Icons\\Ability_Hunter_BeastCall")
                 row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
@@ -1134,7 +1272,7 @@ local function SetRowIcon(row, e)
         local coords = classKey and ((CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[classKey]) or CLASS_COORDS[classKey])
         if coords then
             row.icon:SetTexture(CLASS_TEXTURE)
-            row.icon:SetTexCoord(coords[1] + 0.015, coords[2] - 0.015, coords[3] + 0.015, coords[4] - 0.015)
+            CropIcon(row.icon, coords)
         else
             row.icon:SetTexture("Interface\\Icons\\INV_Misc_QuestionMark")
             row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
@@ -1228,7 +1366,7 @@ local function Render()
                         end
                     else
                         row.unitName = e.name
-                        row.name:SetText(RANK_PREFIX[i] .. (e.name or ""))
+                        row.name:SetFormattedText("%d. %s", i, e.name or "")
                     end
                 end
                 PaintSecretText(row.value, showValues, e.value, e.pct)
@@ -1262,21 +1400,24 @@ local function Render()
                 elseif row.rank ~= i or row.unitName ~= e.name then
                     row.rank = i
                     row.unitName = e.name
-                    row.name:SetText(RANK_PREFIX[i] .. (e.name or ""))
+                    row.name:SetFormattedText("%d. %s", i, e.name or "")
                     nameChanged = true
                 end
                 local pctInt = floor(e.pct + 0.5)
                 local qVal = showValues and QuantizeValue(e.value) or nil
-                if row.pctInt ~= pctInt or row.valueMode ~= showValues or (showValues and row.rawValue ~= qVal) then
+                local qTps = showValues and QuantizeValue(e.tps or 0) or nil
+                if row.pctInt ~= pctInt or row.valueMode ~= showValues or (showValues and (row.rawValue ~= qVal or row.rawTps ~= qTps)) then
                     local pctText = PCT_TEXT[pctInt] or (tostring(pctInt) .. "%")
-                    local text = showValues and (FormatValue(e.value) .. " (" .. pctText .. ")") or pctText
                     row.pctInt = pctInt
                     row.rawValue = qVal
+                    row.rawTps = qTps
                     row.valueMode = showValues
-                    if row.valueText ~= text then
-                        row.valueText = text
-                        row.value:SetText(text)
+                    if showValues then
+                        row.value:SetFormattedText("%s (%s) %s", FormatValue(e.value), FormatValue(e.tps or 0), pctText)
+                    else
+                        row.value:SetText(pctText)
                     end
+                    row.valueText = pctText
                 end
             end
             SetRowIcon(row, e)
@@ -1349,10 +1490,10 @@ local function ShouldShow()
     if testMode then
         return true
     end
-    if DB.onlyInGroup and not InGroup() then
+    if DB.onlyInGroup and rosterMode == "solo" then
         return false
     end
-    if DB.hideOutOfCombat and not (inCombat or UnitAffectingCombat("player")) then
+    if DB.hideOutOfCombat and not inCombat then
         return false
     end
     if DB.onlyWithThreat and #data == 0 then
@@ -1419,22 +1560,24 @@ local function ApplyMinimized()
     local minimized = DB.minimized and true or false
     if ui.minState ~= minimized then
         ui.minState = minimized
-        btn.iconY = 0
         btn.icon:ClearAllPoints()
-        btn.icon:SetPoint("CENTER", btn, "CENTER", 0, btn.iconY)
         if minimized then
-            btn.iconShadow:Hide()
+            btn.icon:SetPoint("CENTER", btn, "CENTER", 0, 0)
             ui.body:Hide()
             f.bgTex:Hide()
             btn.plus:Show()
         else
-            btn.iconShadow:Show()
+            btn.icon:SetPoint("BOTTOM", btn, "BOTTOM", 0, 4)
             ui.body:Show()
             f.bgTex:Show()
             btn.plus:Hide()
         end
+        if ui.menuBtn and ui.menuBtn.icon then
+            ui.menuBtn.icon:SetTexture(minimized and "Interface\\Buttons\\UI-SpellbookIcon-NextPage-Up" or "Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Up")
+            ui.menuBtn.icon:SetVertexColor(1, 0.86, 0.18, 1)
+        end
     end
-    local wantH = minimized and TITLE_HEIGHT or DB.height
+    local wantH = minimized and FRAME_CHROME or DB.height
     if abs((f:GetHeight() or 0) - wantH) > 0.5 then
         f:SetHeight(wantH)
     end
@@ -1463,6 +1606,10 @@ function NS.ApplySettings()
     if not ui.frame then
         return
     end
+    if NS.EnsureDefaults then
+        NS.EnsureDefaults(DB)
+    end
+    SanitizeDB()
     local f = ui.frame
     ui.applying = true
     if ui.appliedScale ~= DB.scale then
@@ -1486,6 +1633,7 @@ function NS.ApplySettings()
     ApplyMinimized()
     ui.applying = false
     UpdateModeButton()
+    ApplyAllRowChrome()
     if DB.minimized then
         ui.layoutH = nil
     else
@@ -1525,13 +1673,17 @@ function NS.SetMode(mode)
     NS.Update()
 end
 
-function NS.ToggleLock()
-    DB.locked = not DB.locked
+function NS.SetLocked(locked)
+    DB.locked = locked and true or false
     UpdateGrip()
-    NS.Print(DB.locked and "Window locked." or "Window unlocked.")
     if NS.RefreshOptions then
         NS.RefreshOptions()
     end
+end
+
+function NS.ToggleLock()
+    NS.SetLocked(not DB.locked)
+    NS.Print(DB.locked and "Window locked." or "Window unlocked.")
 end
 
 function NS.ToggleMinimized()
@@ -1549,7 +1701,7 @@ end
 function NS.SetHidden(hidden)
     DB.hidden = hidden and true or false
     if DB.hidden then
-        inCombat = UnitAffectingCombat("player") and true or false
+        inCombat = PlayerInCombat()
         NS.UpdateVisibility()
         SyncDriver()
         if NS.RefreshOptions then
@@ -1618,6 +1770,34 @@ end
 -- Aggro warning
 ----------------------------------------------------------------------
 
+local function ActingAsTank()
+    local mode = DB.roleMode
+    if mode == "tank" then
+        return true
+    end
+    if mode == "dps" then
+        return false
+    end
+    if UnitGroupRolesAssigned then
+        local ok, role = pcall(UnitGroupRolesAssigned, "player")
+        if ok and not IsSecret(role) then
+            if role == "TANK" then
+                return true
+            end
+            if role == "HEALER" or role == "DAMAGER" then
+                return false
+            end
+        end
+    end
+    if GetPartyAssignment then
+        local ok, assigned = pcall(GetPartyAssignment, "MAINTANK", "player")
+        if ok and assigned then
+            return true
+        end
+    end
+    return false
+end
+
 local function PlayWarning()
     local id = (SOUNDKIT and SOUNDKIT.RAID_WARNING) or 8959
     if pcall(PlaySound, id, "Master") then
@@ -1626,9 +1806,34 @@ local function PlayWarning()
     pcall(PlaySound, id)
 end
 
-local function WarningSource()
+local function WarningSource(tank)
     if not DB.warnEnabled then
         return nil
+    end
+    if tank == nil then
+        tank = ActingAsTank()
+    end
+    if tank then
+        local rival
+        local rivalPct
+        local rivalStatus = -1
+        for i = 1, #data do
+            local entry = data[i]
+            if entry ~= playerEntry and entry ~= petEntry then
+                if entry.isTanking then
+                    return entry
+                end
+                local pct = PlainPct(entry)
+                if pct and pct >= (DB.warnThreshold or 90) and (not rivalPct or pct > rivalPct) then
+                    rival = entry
+                    rivalPct = pct
+                elseif pct == nil and (entry.status or -1) > rivalStatus and (entry.status or -1) >= 1 then
+                    rival = entry
+                    rivalStatus = entry.status or -1
+                end
+            end
+        end
+        return rival
     end
     if playerEntry and playerEntry.isTanking then
         return nil
@@ -1659,17 +1864,39 @@ local function WarningSource()
     return best
 end
 
+local function PaintTitle(state)
+    if ui.titleState == state then
+        return
+    end
+    ui.titleState = state
+    titleHot = state == "hot"
+    if state == "hot" then
+        ui.title:SetTextColor(COLOR.warn[1], COLOR.warn[2], COLOR.warn[3])
+    elseif state == "warm" then
+        ui.title:SetTextColor(1, 0.62, 0.12)
+    else
+        ui.title:SetTextColor(1, 0.86, 0.18)
+    end
+end
+
 function CheckWarning()
     if not ui.title then
         return
     end
-    local me = WarningSource()
+    local tank = ActingAsTank()
+    local me = WarningSource(tank)
     local hot = false
+    local warm = false
     local pct = PlainPct(me)
+    local threshold = DB.warnThreshold or 90
     if me and pct == nil then
         -- Status 1 is the client's "about to pull" state. The percent slider
         -- cannot be read while the threat percent is secret.
-        hot = me.status == 1
+        if tank then
+            hot = me.isTanking or (me.status or 0) >= 1
+        else
+            hot = me.status == 1
+        end
         if hot then
             if not warned then
                 warned = true
@@ -1682,7 +1909,7 @@ function CheckWarning()
         end
     else
         pct = pct or 0
-        hot = me and pct >= DB.warnThreshold and true or false
+        hot = me and pct >= threshold and true or false
         if hot then
             if not warned then
                 warned = true
@@ -1691,17 +1918,21 @@ function CheckWarning()
                     PlayWarning()
                 end
             end
-        elseif not me or pct < DB.warnThreshold - 10 then
-            warned = false
+        else
+            if me and not tank and pct >= (threshold - 15) then
+                warm = true
+            end
+            if not me or pct < threshold - 10 then
+                warned = false
+            end
         end
     end
-    if hot ~= titleHot then
-        titleHot = hot
-        if hot then
-            ui.title:SetTextColor(COLOR.warn[1], COLOR.warn[2], COLOR.warn[3])
-        else
-            ui.title:SetTextColor(COLOR.gold[1], COLOR.gold[2], COLOR.gold[3])
-        end
+    if hot then
+        PaintTitle("hot")
+    elseif warm then
+        PaintTitle("warm")
+    else
+        PaintTitle("ok")
     end
 end
 
@@ -1710,7 +1941,8 @@ end
 ----------------------------------------------------------------------
 
 local function DoUpdate()
-    inCombat = UnitAffectingCombat("player") and true or false
+    inCombat = PlayerInCombat()
+    RefreshRoster()
 
     if testMode then
         BuildTestData()
@@ -1718,7 +1950,7 @@ local function DoUpdate()
         lastMobName = "Training Dummy"
         SetTargetLabel(lastMobName)
     else
-        local groupOk = not DB.onlyInGroup or InGroup()
+        local groupOk = not DB.onlyInGroup or rosterMode ~= "solo"
         local canShow = not DB.hidden and groupOk and (not DB.hideOutOfCombat or inCombat)
         local warnActive = DB.warnEnabled and inCombat and groupOk
         if not canShow and not warnActive then
@@ -1973,7 +2205,7 @@ local function CreateMenu()
     menu:SetFrameStrata("DIALOG")
     menu:SetClampedToScreen(true)
     menu:EnableMouse(true)
-    NS.ApplyBackdrop(menu, NS.BACKDROP_MENU, COLOR.menuBg, COLOR.buttonEdge)
+    NS.ApplyBackdrop(menu, NS.BACKDROP_MENU, COLOR.menuBg, NS.HUD_BORDER)
     menu.buttons = {}
     menu:Hide()
     menu:SetScript("OnShow", function(self)
@@ -1992,21 +2224,23 @@ end
 ----------------------------------------------------------------------
 
 local function CreateHeaderButton(parent, kind)
-    local b = CreateFrame("Button", nil, parent)
+    local b = CreateFrame("Button", nil, parent, TEMPLATE)
     b:SetSize(BUTTON_SIZE, BUTTON_SIZE)
-    NS.StyleButton(b, kind)
+    NS.StyleHeaderButton(b, kind)
 
     b:SetScript("OnMouseDown", function(self)
-        if self.icon then
-            self.icon:ClearAllPoints()
-            self.icon:SetPoint("CENTER", self, "CENTER", 1 + (self.iconX or 0), -1 + (self.iconY or 0))
+        if self.lockIcon or not self.icon then
+            return
         end
+        self.icon:ClearAllPoints()
+        self.icon:SetPoint("CENTER", self, "CENTER", 1 + (self.iconX or 0), -1 + (self.iconY or 0))
     end)
     b:SetScript("OnMouseUp", function(self)
-        if self.icon then
-            self.icon:ClearAllPoints()
-            self.icon:SetPoint("CENTER", self, "CENTER", self.iconX or 0, self.iconY or 0)
+        if self.lockIcon or not self.icon then
+            return
         end
+        self.icon:ClearAllPoints()
+        self.icon:SetPoint("CENTER", self, "CENTER", self.iconX or 0, self.iconY or 0)
     end)
     b:SetScript("OnEnter", function(self)
         NS.SetButtonHover(self, true)
@@ -2061,7 +2295,7 @@ local function Grip_OnMouseUp()
 end
 
 local function CreateWindow()
-    local f = CreateFrame("Frame", "XiusThreatMeterFrame", UIParent)
+    local f = CreateFrame("Frame", "XiusThreatMeterFrame", UIParent, TEMPLATE)
     f:SetFrameStrata("MEDIUM")
     f:SetMovable(true)
     f:SetResizable(true)
@@ -2076,11 +2310,12 @@ local function CreateWindow()
             f:SetMaxResize(MAX_WIDTH, MAX_HEIGHT)
         end
     end
-    NS.CreateWindowBackground(f)
+    NS.CreateWindowBackground(f, TITLE_HEIGHT)
+    NS.ApplyHudChrome(f)
     f:SetSize(DB.width, DB.height)
     ui.frame = f
 
-    -- Title bar (glow + gold lines, also the drag handle)
+    -- Rounded gold header sits on the top edge. The body below it stays black.
     local titleBar = NS.CreateTitleBar(f, TITLE_HEIGHT)
     titleBar:EnableMouse(true)
     titleBar:RegisterForDrag("LeftButton")
@@ -2093,41 +2328,46 @@ local function CreateWindow()
     end)
     ui.titleBar = titleBar
 
-    -- Dropdown arrow button (left)
-    local menuBtn = CreateHeaderButton(titleBar, "bronze")
+    -- Collapse arrow sits on the title baseline, same gold as "Threat".
+    local menuBtn = CreateHeaderButton(titleBar, "dark")
     menuBtn:SetPoint("LEFT", titleBar, "LEFT", SIDE_PAD, 0)
-    menuBtn.iconY = 0
-    menuBtn.icon = NS.CreateArrowGlyph(menuBtn, menuBtn.iconY)
+    menuBtn.icon = menuBtn:CreateTexture(nil, "ARTWORK")
+    menuBtn.icon:SetSize(16, 16)
+    menuBtn.icon:SetPoint("CENTER", menuBtn, "CENTER", 0, 0)
+    menuBtn.icon:SetTexture("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Up")
+    menuBtn.icon:SetVertexColor(1, 0.86, 0.18, 1)
     menuBtn.tipTitle = "Threat Meter"
     menuBtn.tipText = "Choose what to track and open window options."
     menuBtn:SetScript("OnClick", ShowMenu)
+    menuBtn:SetScript("OnEnter", function(self)
+        ShowTooltip(self, self.tipTitle, self.tipText)
+    end)
+    menuBtn:SetScript("OnLeave", HideTooltip)
     ui.menuBtn = menuBtn
 
-    -- Minimize button (far right): thin centered gold dash like Damage Done.
+    -- Minimize button (far right): crimson button with a gold underscore at the bottom.
     local minimizeBtn = CreateHeaderButton(titleBar, "red")
     minimizeBtn:SetPoint("RIGHT", titleBar, "RIGHT", -SIDE_PAD, 0)
-    minimizeBtn.iconY = 0
-    minimizeBtn.icon = NS.SolidTexture(minimizeBtn, "ARTWORK", 1, COLOR.dash)
-    minimizeBtn.icon:SetSize(10, 2)
-    minimizeBtn.icon:SetPoint("CENTER", minimizeBtn, "CENTER", 0, minimizeBtn.iconY)
-    minimizeBtn.iconShine = NS.SolidTexture(minimizeBtn, "ARTWORK", 2, { 1, 0.88, 0.25, 0.85 })
-    minimizeBtn.iconShine:SetHeight(1)
-    minimizeBtn.iconShine:SetPoint("TOPLEFT", minimizeBtn.icon, "TOPLEFT", 0, 0)
-    minimizeBtn.iconShine:SetPoint("TOPRIGHT", minimizeBtn.icon, "TOPRIGHT", 0, 0)
-    minimizeBtn.iconShadow = NS.SolidTexture(minimizeBtn, "ARTWORK", 0, { 0.12, 0.02, 0, 0.9 })
-    minimizeBtn.iconShadow:SetHeight(1)
-    minimizeBtn.iconShadow:SetPoint("TOPLEFT", minimizeBtn.icon, "BOTTOMLEFT", 0, 0)
-    minimizeBtn.iconShadow:SetPoint("TOPRIGHT", minimizeBtn.icon, "BOTTOMRIGHT", 0, 0)
-    minimizeBtn.plus = NS.SolidTexture(minimizeBtn, "ARTWORK", 1, COLOR.dash)
-    minimizeBtn.plus:SetSize(2, 10)
-    minimizeBtn.plus:SetPoint("CENTER", minimizeBtn.icon, "CENTER", 0, 0)
+    minimizeBtn.lockIcon = true
+    minimizeBtn.topLight = minimizeBtn:CreateTexture(nil, "ARTWORK", nil, 0)
+    minimizeBtn.topLight:SetPoint("TOPLEFT", minimizeBtn, "TOPLEFT", 3, -3)
+    minimizeBtn.topLight:SetPoint("TOPRIGHT", minimizeBtn, "TOPRIGHT", -3, -3)
+    minimizeBtn.topLight:SetHeight(7)
+    NS.SetGradient(minimizeBtn.topLight, "VERTICAL", { 0.95, 0.20, 0.15 }, 0, { 0.95, 0.20, 0.15 }, 0.6)
+    minimizeBtn.icon = NS.SolidTexture(minimizeBtn, "ARTWORK", 1, { 1, 0.86, 0.15, 1 })
+    minimizeBtn.icon:SetSize(10, 3)
+    minimizeBtn.icon:SetPoint("BOTTOM", minimizeBtn, "BOTTOM", 0, 4)
+    minimizeBtn.plus = NS.SolidTexture(minimizeBtn, "ARTWORK", 2, { 1, 0.86, 0.15, 1 })
+    minimizeBtn.plus:SetSize(3, 10)
+    minimizeBtn.plus:SetPoint("CENTER", minimizeBtn, "CENTER", 0, 0)
+    minimizeBtn.plus:Hide()
     minimizeBtn.tipTitle = "Minimize"
     minimizeBtn.tipText = "Collapse or expand the window."
     minimizeBtn:SetScript("OnClick", NS.ToggleMinimized)
     ui.minimizeBtn = minimizeBtn
 
     -- Settings button
-    local gearBtn = CreateHeaderButton(titleBar, "grey")
+    local gearBtn = CreateHeaderButton(titleBar, "bronze")
     gearBtn:SetPoint("RIGHT", minimizeBtn, "LEFT", -BUTTON_GAP, 0)
     gearBtn.icon = NS.CreateGearGlyph(gearBtn)
     gearBtn.tipTitle = "Settings"
@@ -2142,9 +2382,10 @@ local function CreateWindow()
     -- Target / focus mode button
     local modeBtn = CreateHeaderButton(titleBar, "bronze")
     modeBtn:SetPoint("RIGHT", gearBtn, "LEFT", -BUTTON_GAP, 0)
-    modeBtn.icon = modeBtn:CreateFontString(nil, "OVERLAY")
-    NS.SetFont(modeBtn.icon, 12)
+    modeBtn.icon = modeBtn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     modeBtn.icon:SetTextColor(COLOR.gold[1], COLOR.gold[2], COLOR.gold[3])
+    modeBtn.icon:SetShadowColor(0, 0, 0, 0.9)
+    modeBtn.icon:SetShadowOffset(1, -1)
     modeBtn.icon:SetPoint("CENTER", 0, 0)
     modeBtn.tipTitle = "Target / Focus"
     modeBtn.tipText = "T = threat on your target.\nF = threat on your focus.\nClick to switch."
@@ -2155,8 +2396,10 @@ local function CreateWindow()
 
     -- Title + target name
     local title = titleBar:CreateFontString(nil, "OVERLAY")
-    NS.SetFont(title, 13)
-    title:SetTextColor(COLOR.gold[1], COLOR.gold[2], COLOR.gold[3])
+    title:SetFont(NS.FONT, 13, "")
+    title:SetTextColor(1, 0.86, 0.18)
+    title:SetShadowColor(0, 0, 0, 1)
+    title:SetShadowOffset(1, -1)
     title:SetPoint("LEFT", menuBtn, "RIGHT", 4, 0)
     title:SetText("Threat")
     ui.title = title
@@ -2172,8 +2415,8 @@ local function CreateWindow()
 
     -- Bar area
     local body = CreateFrame("Frame", nil, f)
-    body:SetPoint("TOPLEFT", f, "TOPLEFT", SIDE_PAD, -(TITLE_HEIGHT + BODY_TOP_GAP))
-    body:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -SIDE_PAD, SIDE_PAD)
+    body:SetPoint("TOPLEFT", f, "TOPLEFT", HUD_INSET, -TITLE_HEIGHT)
+    body:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -HUD_INSET, HUD_INSET)
     if body.SetClipsChildren then
         body:SetClipsChildren(true)
     end
@@ -2182,7 +2425,7 @@ local function CreateWindow()
     -- Resize grip
     local grip = CreateFrame("Button", nil, f)
     grip:SetSize(14, 14)
-    grip:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -2, 2)
+    grip:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -3, 3)
     grip:SetFrameLevel(f:GetFrameLevel() + 20)
     grip:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
     grip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
@@ -2261,8 +2504,9 @@ function SyncDriver(skipCombatRefresh)
         return
     end
     if not skipCombatRefresh then
-        inCombat = UnitAffectingCombat("player") and true or false
+        inCombat = PlayerInCombat()
     end
+    RefreshRoster()
     if DB.hidden then
         if DB.warnEnabled and inCombat and not testMode then
             StartDriver(COMBAT_REFRESH)
@@ -2282,7 +2526,7 @@ function SyncDriver(skipCombatRefresh)
     end
     -- Out of combat: only poll while a hostile target/focus is up and the
     -- window is allowed to show (including waiting for threat to appear).
-    if not DB.hideOutOfCombat and (not DB.onlyInGroup or InGroup()) and GetMobUnit() then
+    if not DB.hideOutOfCombat and (not DB.onlyInGroup or rosterMode ~= "solo") and GetMobUnit() then
         StartDriver(IDLE_REFRESH)
         return
     end
@@ -2328,7 +2572,7 @@ driver:SetScript("OnEvent", function(self, event, arg1)
             DB = NS.db
         end
         SanitizeDB()
-        inCombat = UnitAffectingCombat("player") and true or false
+        inCombat = PlayerInCombat()
         CreateWindow()
         if NS.InitOptions then
             NS.InitOptions()
@@ -2361,7 +2605,7 @@ driver:SetScript("OnEvent", function(self, event, arg1)
 
     if event == "PLAYER_REGEN_ENABLED" then
         RequestUpdate(true)
-        inCombat = UnitAffectingCombat("player") and true or false
+        inCombat = PlayerInCombat()
         SyncDriver()
         return
     end
@@ -2434,7 +2678,7 @@ driver:SetScript("OnEvent", function(self, event, arg1)
         elseif not mob and not inCombat then
             return
         end
-        if inCombat or UnitAffectingCombat("player") then
+        if PlayerInCombat() then
             inCombat = true
             RequestUpdate(false)
         else
@@ -2452,7 +2696,7 @@ driver:SetScript("OnEvent", function(self, event, arg1)
             return
         end
         -- SITUATION_UPDATE's unit is the player/pet whose status changed.
-        if inCombat or UnitAffectingCombat("player") then
+        if PlayerInCombat() then
             inCombat = true
             RequestUpdate(false)
         else
@@ -2486,17 +2730,20 @@ end)
 SLASH_XIUSTHREATMETER1 = "/xtm"
 SLASH_XIUSTHREATMETER2 = "/xthreat"
 SlashCmdList.XIUSTHREATMETER = function(msg)
+    msg = ((msg or ""):match("^%s*(.-)%s*$") or ""):lower()
+    if msg == "" or msg == "config" or msg == "options" or msg == "settings" then
+        local Lib = _G.XiusCoreSettingsLib or _G.XiusUISettingsLib
+        if Lib and Lib.OpenModule then
+            pcall(Lib.OpenModule, Lib, "Threat")
+        elseif NS.OpenOptions then
+            NS.OpenOptions()
+        end
+        return
+    end
     if not ui.frame then
         return
     end
-    msg = ((msg or ""):match("^%s*(.-)%s*$") or ""):lower()
-    if msg == "" or msg == "config" or msg == "options" or msg == "settings" then
-        if NS.OpenOptions then
-            NS.OpenOptions()
-        elseif NS.ToggleOptions then
-            NS.ToggleOptions()
-        end
-    elseif msg == "show" then
+    if msg == "show" then
         NS.SetHidden(false)
     elseif msg == "hide" then
         NS.SetHidden(true)
@@ -2512,6 +2759,7 @@ SlashCmdList.XIUSTHREATMETER = function(msg)
         NS.SetMode(msg)
         NS.Print("Now tracking threat on your " .. msg .. ".")
     elseif msg == "check" or msg == "status" then
+        RefreshRoster()
         local mob = GetMobUnit()
         local mobName = "nobody"
         if mob then
@@ -2530,17 +2778,17 @@ SlashCmdList.XIUSTHREATMETER = function(msg)
         end
         local why = nil
         if not DB.hidden and not testMode and not ui.frame:IsShown() then
-            if DB.onlyInGroup and not InGroup() then
+            if DB.onlyInGroup and rosterMode == "solo" then
                 why = "Only show in a group is on, and you are solo."
-            elseif DB.hideOutOfCombat and not UnitAffectingCombat("player") then
+            elseif DB.hideOutOfCombat and not PlayerInCombat() then
                 why = "Hide when out of combat is on."
             elseif DB.onlyWithThreat and #data == 0 then
                 why = "Only show when there is threat is on, and nobody has threat yet."
             end
         end
         NS.Print("Mode: " .. (DB.mode == "focus" and "focus" or "target") .. ". Window: " .. where .. ". Tracking: " .. mobName .. ".")
-        NS.Print("Combat: " .. (UnitAffectingCombat("player") and "yes" or "no")
-            .. ". Group: " .. (InGroup() and "yes" or "no")
+        NS.Print("Combat: " .. (PlayerInCombat() and "yes" or "no")
+            .. ". Group: " .. (rosterMode ~= "solo" and "yes" or "no")
             .. ". Test mode: " .. (testMode and "on" or "off") .. ".")
         NS.Print("Threat readout: " .. (UnitDetailedThreatSituation and "available" or "missing")
             .. ". People on the list: " .. tostring(#data) .. ".")
@@ -2554,7 +2802,7 @@ SlashCmdList.XIUSTHREATMETER = function(msg)
         NS.Print("Only with threat " .. (DB.onlyWithThreat and "on" or "off")
             .. ", hide out of combat " .. (DB.hideOutOfCombat and "on" or "off")
             .. ", only in a group " .. (DB.onlyInGroup and "on" or "off") .. ".")
-        NS.Print("Warning " .. (DB.warnEnabled and "on" or "off") .. " at " .. tostring(floor(DB.warnThreshold + 0.5)) .. "%.")
+        NS.Print("Warning " .. (DB.warnEnabled and "on" or "off") .. " at " .. tostring(floor(DB.warnThreshold + 0.5)) .. "%. Role: " .. tostring(DB.roleMode or "auto") .. ".")
         if why then
             NS.Print(why)
         end
@@ -2568,4 +2816,8 @@ SlashCmdList.XIUSTHREATMETER = function(msg)
         NS.Print("  /xtm reset - reset window position and size")
         NS.Print("  /xtm check - show whether each option is on and why the window may be hidden")
     end
+end
+
+if XiusUI and XiusUI.RegisterModule then
+    XiusUI:RegisterModule("Threat", NS)
 end

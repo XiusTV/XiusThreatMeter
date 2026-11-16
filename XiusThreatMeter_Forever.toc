@@ -1,0 +1,18 @@
+## Interface: 16001
+## Title: Xius Threat Meter
+## Notes: Group threat meter for World of Warcraft Forever. Type /xtm
+## Author: Xius
+## Version: 1.6.2
+## SavedVariables: XiusThreatMeterDB
+## IconTexture: Interface\Icons\Ability_Warrior_Challange
+## Category: User Interface
+## Group: XiusCore
+## X-Part-Of: XiusCore
+## AllowLoadGameType: forever, camelot
+## Dependencies: XiusCore
+## RequiredDeps: XiusCore
+
+Config.lua
+Core.lua
+Options.lua
+Libs/SettingsGlue.lua
