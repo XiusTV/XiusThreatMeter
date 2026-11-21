@@ -12,20 +12,27 @@ The window is meant to blend with the default UI.
 
 - **Group and raid:** Tracks you, your party, your raid (up to 40 players), and pets on the enemy's threat table.
 - **Target or focus:** Watch your target, or switch to your focus with the `T` / `F` button.
-- **Ranked bars:** Each row shows rank, name, threat, and percent, for example `1. Xius  1,234 (87%)`.
+- **Ranked bars:** Each row shows rank, name, threat, TPS, and percent, for example `1. Xius  1,234 (120) (87%)`.
 - **Relative fill:** When the client shows threat numbers, bars fill against the top of the list. When those numbers are hidden, bars fill by aggro percent, so a full bar means that player is about to pull.
+- **Growth and sort:** Bars can grow top-to-bottom or bottom-to-top, and sort by highest threat, lowest threat, or tank first.
 - **Tooltips:** Hover a bar for threat, threat percent, raw threat percent, and whether that player is tanking.
+
+### Ability Threat Estimator
+
+- **Out-of-combat estimates:** Calculates threat for known abilities from your attack power, spell power, weapon damage, form/stance, and talents.
+- **Breakdown window:** Sortable table of hit and crit threat. Open it from Xius Core or with `/xtm abilities`.
+- **Spell tooltips:** While out of combat, spell tooltips show estimated threat (and crit threat) with your current threat multiplier. Nothing is evaluated in combat or against secret values.
 
 ### Aggro warning
 
-- **Pull alert:** Plays a warning sound and turns the window title red as your threat gets close to the tank's. The title turns amber first.
+- **Pull alert:** Turns the window title amber, then red, and can play a warning sound as your threat gets close to the tank's. Visual and audio alerts are separate toggles.
 - **Threshold:** Choose when the warning fires (50% – 100%, default 90%).
 - **Role:** Auto uses your group role when the client has one. Tank warns when someone else contests or takes aggro. DPS and healers are warned as they approach the tank. Your own pet does not trip the warning while you are tanking.
 
 ### Native default UI look
 
 - **Title bar:** The same gold header, header buttons, and dark body as the damage meter.
-- **Class colors and icons:** Bars use class colors. Pets use green bars and their own portraits.
+- **Class colors and icons:** Bars use class colors (optional). Pets use green bars and their own portraits.
 - **Opacity, scale, and texture:** Background opacity, window scale, font size, and bar texture (Blizzard, Flat, or Raid).
 
 ## Display States
@@ -43,6 +50,7 @@ The window is meant to blend with the default UI.
 | `/xtm toggle` | Show or hide the threat window |
 | `/xtm help` | List the commands |
 | `/xtm config` | Open this page in Xius Core |
+| `/xtm abilities` | Open the Ability Threat Breakdown window |
 | `/xtm test` | Toggle test bars |
 | `/xtm lock` or `/xtm unlock` | Lock or unlock moving and resizing |
 | `/xtm target` or `/xtm focus` | Choose which enemy to track |
@@ -61,10 +69,9 @@ The window is meant to blend with the default UI.
 
 Open settings with the gear button, `/xtm`, or `/xius threat`.
 
-- **Window:** Lock, only show when there is threat, hide when out of combat, only show in a group, track target or focus, scale, and background opacity.
-- **Bars:** Class icons, pets, threat numbers, bar height, bar spacing, font size, and bar texture.
-- **Aggro warning:** On or off, role, and the warning threshold.
-- **Tools:** Hide or show the window, test mode, and reset position.
+- **General:** Enable the meter, track target or focus, solo / party / raid visibility, lock, scale, size, opacity, test mode, and the Ability Threat Estimator.
+- **Appearance & Bars:** Bar texture, font size, height, spacing, class colors, icons, threat numbers, TPS, growth direction, and sort order.
+- **Alerts & Roles:** Role mode, warning threshold, visual and audio alerts, pet bars, and pet warning.
 
 Settings are saved for the account and shared with Xius Core profiles.
 

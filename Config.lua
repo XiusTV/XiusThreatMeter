@@ -3,9 +3,10 @@
     Saved settings, colors and shared styling helpers.
 ]]
 
-local ADDON, NS = ...
+local addonName, ns = ...
+local ADDON, NS = addonName, ns
 
-local XiusCore = _G.XiusCore or _G.XiusUI or _G.XiusCoreSettingsLib
+local XiusCore = _G.XiusCore or _G.XiusCoreSettingsLib
 if not XiusCore and C_AddOns and C_AddOns.IsAddOnLoaded then
     local ok, loaded = pcall(C_AddOns.IsAddOnLoaded, "XiusCore")
     XiusCore = ok and loaded and true or false
@@ -18,7 +19,7 @@ if not XiusCore then
     return
 end
 
-NS.VERSION = "1.6.2"
+NS.VERSION = "1.7"
 NS.STYLE_VERSION = 9
 NS.FONT = STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF"
 NS.WHITE = "Interface\\Buttons\\WHITE8X8"
@@ -26,15 +27,9 @@ NS.WHITE = "Interface\\Buttons\\WHITE8X8"
 NS.COLOR = {
     gold = { 1, 209 / 255, 0, 1 },
     goldLine = { 1, 0.82, 0.35, 1 },
-    goldLineDim = { 0.55, 0.42, 0.16, 1 },
-    glow = { 0.22, 0.16, 0.08 },
     window = { 0, 0, 0 },
-    buttonEdge = { 1, 0.82, 0.35, 1 },
-    dash = { 1, 0.82, 0.35, 1 },
     rowEdge = { 0.05, 0.05, 0.06, 1 },
     menuBg = { 0.06, 0.06, 0.08, 0.98 },
-    text = { 1, 1, 1, 1 },
-    muted = { 0.62, 0.60, 0.56, 1 },
     pet = { 0.35, 0.75, 0.35 },
     warn = { 1, 0.25, 0.20, 1 },
 }
@@ -52,20 +47,35 @@ NS.DEFAULTS = {
     barHeight = 19,
     barSpacing = 2,
     showIcons = true,
+    classColors = true,
     showPets = true,
+    warnPets = true,
     showValues = true,
+    showTPS = true,
+    barGrowth = "down",
+    sortOrder = "desc",
+    showSolo = true,
+    showParty = true,
+    showRaid = true,
     hideOutOfCombat = false,
     onlyWithThreat = false,
     onlyInGroup = false,
     warnEnabled = true,
     warnThreshold = 90,
+    warnVisual = true,
+    warnSound = true,
     fontSize = 11,
     barTexture = "blizzard",
     roleMode = "auto",
+    enableAbilityThreatEstimator = true,
+    abilityWindowShown = false,
+    abilityWindowPoint = { "CENTER", "CENTER", 0, 40 },
+    abilityWindowWidth = 540,
+    abilityWindowHeight = 360,
+    abilityHighestRankOnly = true,
 }
 
 NS.HUD_BORDER = { 1, 0.80, 0.32, 1 }
-NS.HUD_OUTER = { 0, 0, 0, 1 }
 NS.HEADER_BACKDROP = {
     bgFile = NS.WHITE,
     edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
@@ -109,7 +119,7 @@ function NS.BindCoreDB()
     if type(XiusThreatMeterDB) ~= "table" then
         XiusThreatMeterDB = {}
     end
-    if not (XiusUI and type(XiusUIDB) == "table") then
+    if type(XiusUIDB) ~= "table" then
         return XiusThreatMeterDB
     end
     if type(XiusUIDB.threat) ~= "table" then
@@ -147,6 +157,9 @@ end
 
 function NS.InitDB()
     local db = NS.BindCoreDB()
+    if type(db) == "table" and db.showSolo == nil and db.onlyInGroup == true then
+        db.showSolo = false
+    end
     NS.EnsureDefaults(db)
     if (db.styleVersion or 0) < NS.STYLE_VERSION then
         db.styleVersion = NS.STYLE_VERSION
@@ -303,40 +316,6 @@ function NS.SetWindowAlpha(frame, alpha)
     tex:SetVertexColor(c[1], c[2], c[3], alpha)
 end
 
--- A line or glow strip that fades out at both ends.
--- Returns a table of the three pieces so callers can hide/show them together.
-function NS.CreateFadedStrip(parent, layer, sublevel, fadeWidth)
-    local strip = {}
-    strip.left = parent:CreateTexture(nil, layer, nil, sublevel)
-    strip.mid = parent:CreateTexture(nil, layer, nil, sublevel)
-    strip.right = parent:CreateTexture(nil, layer, nil, sublevel)
-    strip.fade = fadeWidth
-    return strip
-end
-
-function NS.AnchorFadedStrip(strip, parent, top, height)
-    local fade = strip.fade
-    strip.left:ClearAllPoints()
-    strip.left:SetPoint("TOPLEFT", parent, "TOPLEFT", 0, top)
-    strip.left:SetSize(fade, height)
-    strip.right:ClearAllPoints()
-    strip.right:SetPoint("TOPRIGHT", parent, "TOPRIGHT", 0, top)
-    strip.right:SetSize(fade, height)
-    strip.mid:ClearAllPoints()
-    strip.mid:SetPoint("TOPLEFT", strip.left, "TOPRIGHT", 0, 0)
-    strip.mid:SetPoint("BOTTOMRIGHT", strip.right, "BOTTOMLEFT", 0, 0)
-end
-
-function NS.ColorFadedStrip(strip, color, alpha, midBottom, midTop)
-    NS.SetGradient(strip.left, "HORIZONTAL", color, 0, color, alpha)
-    NS.SetGradient(strip.right, "HORIZONTAL", color, alpha, color, 0)
-    if midBottom and midTop then
-        NS.SetGradient(strip.mid, "VERTICAL", midBottom, alpha, midTop, alpha)
-    else
-        NS.SetGradient(strip.mid, "VERTICAL", color, alpha, color, alpha)
-    end
-end
-
 -- 25px Damage Done header: rounded gold-bronze tooltip frame over a warm metallic fill.
 function NS.CreateTitleBar(frame, height)
     local bar = CreateFrame("Frame", nil, frame, NS.BACKDROP_TEMPLATE)
@@ -392,12 +371,6 @@ end
 -- Button skins: 1px rim with rounded corners, dark inner line, bevelled fill.
 local BUTTON_SKINS = {
     bronze = {
-        rimTop = { 0.55, 0.42, 0.22 }, rimBottom = { 0.22, 0.15, 0.07 },
-        fillTop = { 0.28, 0.20, 0.10 }, fillBottom = { 0.10, 0.07, 0.04 },
-        bevelTop = { 0.48, 0.36, 0.16 }, bevelTop2 = { 0.32, 0.23, 0.10 },
-        bevelLeftTop = { 0.40, 0.30, 0.14 }, bevelLeftBottom = { 0.16, 0.11, 0.05 },
-    },
-    grey = {
         rimTop = { 0.55, 0.42, 0.22 }, rimBottom = { 0.22, 0.15, 0.07 },
         fillTop = { 0.28, 0.20, 0.10 }, fillBottom = { 0.10, 0.07, 0.04 },
         bevelTop = { 0.48, 0.36, 0.16 }, bevelTop2 = { 0.32, 0.23, 0.10 },
@@ -511,10 +484,6 @@ function NS.StyleButton(b, kind)
     hl:SetBlendMode("ADD")
 end
 
--- Hover feedback comes from the HIGHLIGHT layer; kept so callers don't need to care.
-function NS.SetButtonHover()
-end
-
 ----------------------------------------------------------------------
 -- Button glyphs (drawn from plain shapes so they stay crisp and gold)
 ----------------------------------------------------------------------
@@ -569,36 +538,5 @@ function NS.CreateGearGlyph(button)
     Circle(g, 7.6, 3, GOLD_BOTTOM, GOLD_TOP)
     Circle(g, 4.6, 4, { 0.07, 0.07, 0.07 })
     Circle(g, 2.4, 5, GOLD_BOTTOM, GOLD_TOP)
-    return g
-end
-
--- Filled chevron that sits large in the header button, like Damage Done.
--- { left offset, width } per row.
-local ARROW_ROWS = {
-    { 0, 14 }, { 0, 13 }, { 1, 11 }, { 2, 9 }, { 3, 7 }, { 4, 5 }, { 5, 3 }, { 6, 1 },
-}
-
-function NS.CreateArrowGlyph(button, yOffset)
-    local g = CreateFrame("Frame", nil, button)
-    g:SetSize(14, #ARROW_ROWS + 1)
-    g:SetPoint("CENTER", button, "CENTER", 0, yOffset or 0)
-
-    local topEdge = g:CreateTexture(nil, "ARTWORK", nil, 0)
-    topEdge:SetTexture(NS.WHITE)
-    topEdge:SetVertexColor(0, 0, 0, 0.85)
-    topEdge:SetSize(14, 1)
-    topEdge:SetPoint("TOPLEFT", g, "TOPLEFT", 0, 0)
-
-    local n = #ARROW_ROWS
-    for i, row in ipairs(ARROW_ROWS) do
-        local f = (i - 1) / (n - 1)
-        local left = { 1, 0.96 - f * 0.22, 0 }
-        local right = { 0.98, 0.78 - f * 0.16, 0 }
-        local t = g:CreateTexture(nil, "ARTWORK", nil, 1)
-        t:SetTexture(NS.WHITE)
-        t:SetSize(row[2], 1)
-        t:SetPoint("TOPLEFT", g, "TOPLEFT", row[1], -i)
-        ApplyGradient(t, "HORIZONTAL", left, right)
-    end
     return g
 end

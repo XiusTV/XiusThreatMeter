@@ -1,0 +1,18 @@
+Xius Threat Meter v1.7
+
+Compared to GitHub v1.6.2 (2026-11-16):
+
+Added
+- Ability Threat Estimator with curated spell database, breakdown window, and out-of-combat tooltip estimates
+- /xtm abilities and Xius Core General-tab controls for the estimator
+- TPS toggle, bar growth direction, sort order (incl. tank first)
+- Solo / party / raid visibility toggles
+- Separate visual and audio aggro alerts, pet-warning toggle, class-color toggle
+- Colored title, LoadSavedVariablesFirst, wider Interface / game-type support
+
+Changed
+- Settings split into General, Appearance & Bars, Alerts & Roles
+- Xius Core only (no XiusUI fallback)
+
+Improved
+- TPS sample reset on target/combat change; live options refresh

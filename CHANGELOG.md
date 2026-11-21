@@ -2,6 +2,28 @@
 
 All notable changes to Xius Threat Meter are documented here.
 
+## [1.7] - 2026-11-21
+
+### Added
+- **Ability Threat Estimator** (`AbilityThreat.lua`): out-of-combat spell threat estimates from your stats, form/stance, and talents. Covers Warrior, Druid, Paladin, Rogue, Hunter, Priest, Shaman, Mage, Warlock, Death Knight, and more.
+- Ability Threat Breakdown window with sortable columns (hit / crit threat), highest-rank filtering, and a saved window position/size.
+- Estimated threat lines on spell tooltips while out of combat (skipped in combat and when values are secret).
+- Xius Core settings: enable the estimator and open the breakdown from the Threat Meter **General** tab. `/xtm abilities` also opens it.
+- Bar options: show TPS separately from threat numbers, bar growth (top-to-bottom or bottom-to-top), and sort order (highest, lowest, or tank first).
+- Visibility options: show while solo / in party / in raid (replacing the old single “only in a group” toggle).
+- Aggro warning split into visual and audio toggles, plus a Test Sound button. Separate control for including your pet in the warning.
+- Class-color toggle for bars (when off, bars use threat colors).
+- Colored addon title in the AddOns list. `LoadSavedVariablesFirst`. Broader client load tags (`120100`, Forever / Camelot game types on the main TOC).
+
+### Changed
+- Settings pages use Xius Core’s top sub-tabs: **General**, **Appearance & Bars**, and **Alerts & Roles**.
+- Dropped leftover `XiusUI` fallbacks; the addon requires Xius Core only.
+- Removed unused faded-strip / arrow-glyph helpers from Config in favor of the shared Xius Core look.
+
+### Improved
+- TPS samples clear when the target or combat ends so the previous fight’s rate never bleeds into the next pull.
+- Options refresh live while the Threat page is open; OpenOptions can jump to a specific sub-tab.
+
 ## [1.6.2] - 2026-11-16
 
 ### Added

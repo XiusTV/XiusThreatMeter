@@ -3,9 +3,10 @@
     Opens this addon's page in the XiusCore settings window.
 ]]
 
-local _, NS = ...
+local addonName, ns = ...
+local _, NS = addonName, ns
 
-local XiusCore = _G.XiusCore or _G.XiusUI or _G.XiusCoreSettingsLib
+local XiusCore = _G.XiusCore or _G.XiusCoreSettingsLib
 if not XiusCore and C_AddOns and C_AddOns.IsAddOnLoaded then
     local ok, loaded = pcall(C_AddOns.IsAddOnLoaded, "XiusCore")
     XiusCore = ok and loaded and true or false
@@ -19,29 +20,32 @@ if not XiusCore then
 end
 
 local function Library()
-    return _G.XiusCoreSettingsLib or _G.XiusUISettingsLib
+    return _G.XiusCoreSettingsLib
 end
 
-function NS.OpenOptions()
+function NS.OpenOptions(subTab)
     local Lib = Library()
     if Lib and Lib.OpenModule then
-        pcall(Lib.OpenModule, Lib, "Threat")
+        pcall(Lib.OpenModule, Lib, "Threat", subTab)
     elseif Lib and Lib.Open then
-        pcall(Lib.Open, Lib, "Threat")
+        pcall(Lib.Open, Lib, "Threat", subTab)
     end
 end
 
-function NS.ToggleOptions()
+function NS.ToggleOptions(subTab)
     local Lib = Library()
     if Lib and Lib.Toggle then
-        pcall(Lib.Toggle, Lib, "Threat")
+        pcall(Lib.Toggle, Lib, "Threat", subTab)
         return
     end
-    NS.OpenOptions()
-end
-
-function NS.InitOptions()
+    NS.OpenOptions(subTab)
 end
 
 function NS.RefreshOptions()
+    local Lib = Library()
+    if Lib and Lib.frame and Lib.frame:IsShown() and Lib.page == "Threat" then
+        if Lib.RefreshPage then
+            pcall(Lib.RefreshPage, Lib)
+        end
+    end
 end

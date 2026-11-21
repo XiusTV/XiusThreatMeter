@@ -1,18 +1,20 @@
-## Interface: 120105, 120107
-## Title: Xius Threat Meter
+## Interface: 120100, 120105, 120107, 16001
+## Title: |cffd4a85aXius|r |cffff8c42Threat Meter|r
 ## Notes: Group threat meter for modern World of Warcraft. Type /xtm
 ## Author: Xius
-## Version: 1.6.2
+## Version: 1.7
 ## SavedVariables: XiusThreatMeterDB
+## LoadSavedVariablesFirst: 1
 ## IconTexture: Interface\Icons\Ability_Warrior_Challange
 ## Category: User Interface
 ## Group: XiusCore
 ## X-Part-Of: XiusCore
-## AllowLoadGameType: standard
+## AllowLoadGameType: standard, forever, camelot
 ## Dependencies: XiusCore
 ## RequiredDeps: XiusCore
 
 Config.lua
 Core.lua
+AbilityThreat.lua
 Options.lua
 Libs/SettingsGlue.lua
